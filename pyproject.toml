@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epsilab"
-version = "0.1.2"
+version = "0.1.3"
 description = "Python SDK for Epsilab live portfolio data (signals, weights, trades)."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -23,8 +23,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://www.epsilab.ai"
 
-[project.scripts]
-epsilab = "epsilab.__main__:main"
+#[project.scripts]
 
 [tool.hatch.build]
 include = [

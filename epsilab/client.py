@@ -8,7 +8,7 @@ from .exceptions import AuthError, SubscriptionRequiredError, RateLimitError, Ap
 
 class EpsilabClient:
     """
-    Minimal Python client for the Epsilab Website API (pass-through to Strategy-Engine).
+    Minimal Python client for the Epsilab API.
 
     - Auth via API key sent as X-API-Key
     - Persistent HTTP/2 connection via httpx.Client
@@ -112,7 +112,7 @@ class EpsilabClient:
         self._client.headers.update({"X-API-Key": api_key})
 
     # -----------------------------
-    # Strategy-Engine API: Live Portfolio
+    # Epsilab Live Portfolio API
     # -----------------------------
 
     def get_live_latest(self, *, force: bool = False, tolerance_minutes: Optional[int] = None, return_results_if_fresh: bool = False) -> models.LiveLatest:

@@ -36,6 +36,11 @@ Note:
 - Live endpoints are rate limited (e.g., ~1 request/second sustained with small bursts). Excessive requests will receive HTTP 429.
 - Use `nextEtaMin` from `get_live_status()` to poll intelligently. For example, if `nextEtaMin=80.07`, you can sleep ~80 minutes before the next refresh instead of tight-loop polling. The results will be the same.
 
+Set API key in your shell (bash/zsh):
+```bash
+export EPSILAB_API_KEY="<epsk_live_...>"
+```
+
 ## Python Usage
 
 ```python
@@ -56,12 +61,9 @@ equity = client.get_live_equity(limit=200)                             # List[ep
 print(latest)
 ```
 
-## CLI Usage
+## Examples
 
-```bash
-# Set API key in env
-export EPSILAB_API_KEY="<epsk_live_...>"
-```
+See `examples/example.py` for a short polling example that prints summary data every few seconds.
 
 ## Data models
 
@@ -75,7 +77,7 @@ export EPSILAB_API_KEY="<epsk_live_...>"
 
 - `get_live_status()` → `LiveStatus` with fields:
   - `latest_run_id: Optional[str]`
-  - `timeframe: Optional[str]`
+  - `timeframe: Optional[str]` (tf denotes the rebalancing frequency; e.g., `tf=4h` means the portfolio is updated on a 4-hour cadence, based on the most granular timeframe among strategies in the portfolio)
   - `next_eta_minutes: Optional[float]`
   - `counts: Dict[str, int]`
 
