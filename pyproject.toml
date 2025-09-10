@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epsilab"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python SDK for Epsilab live portfolio data (signals, weights, trades)."
 readme = "README.md"
 license = { file = "LICENSE" }
