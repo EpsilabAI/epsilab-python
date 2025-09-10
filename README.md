@@ -1,11 +1,16 @@
 # Epsilab Python SDK
 
-Minimal Python client and CLI for the Epsilab Website API (pass-through to Strategy-Engine). Auth uses an API key.
+Official Python SDK for accessing Epsilab live portfolio data (signals, weights, trades, equity) using an API key.
 
 ## Install
 
 ```bash
 pip install epsilab
+```
+
+If you want HTTP/2 for faster connections, install with:
+```bash
+pip install "httpx[http2]"
 ```
 
 ### Install from source

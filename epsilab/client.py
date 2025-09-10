@@ -20,6 +20,7 @@ class EpsilabClient:
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
+        enable_http2: Optional[bool] = None,
     ) -> None:
         # Read variables from .env without mutating process env
         env = {}
@@ -40,8 +41,26 @@ class EpsilabClient:
         )
         # API key auth (preferred for service usage)
         self._api_key: Optional[str] = api_key or env.get("EPSILAB_API_KEY")
-        # Persistent client (HTTP/2) with keep-alive
-        self._client = httpx.Client(base_url=self.api_base, timeout=self._make_timeout(), http2=True)
+        # Decide HTTP/2 support (auto-detect unless explicitly set)
+        use_http2 = False
+        if enable_http2 is None:
+            try:
+                import h2  # type: ignore  # noqa: F401
+                use_http2 = True
+            except Exception:
+                use_http2 = False
+        else:
+            if enable_http2:
+                try:
+                    import h2  # type: ignore  # noqa: F401
+                    use_http2 = True
+                except Exception:
+                    use_http2 = False
+            else:
+                use_http2 = False
+
+        # Persistent client with keep-alive
+        self._client = httpx.Client(base_url=self.api_base, timeout=self._make_timeout(), http2=use_http2)
         # Apply auth headers if present
         if self._api_key:
             self._client.headers.update({"X-API-Key": self._api_key})
