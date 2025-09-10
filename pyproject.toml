@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "epsilab"
+version = "0.1.0"
+description = "Python SDK for Epsilab live portfolio data (signals, weights, trades)."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [ { name = "Epsilab" } ]
+requires-python = ">=3.9"
+dependencies = [
+  "httpx>=0.27.0",
+  "python-dotenv>=1.0.1",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://www.epsilab.ai"
+
+[project.scripts]
+epsilab = "epsilab.__main__:main"
+
+[tool.hatch.build]
+include = [
+  "epsilab/**",
+  "README.md",
+  "LICENSE",
+  "examples/**",
+]
+exclude = [
+  "portfolio.logs",
+]
+
+
