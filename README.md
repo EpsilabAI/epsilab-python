@@ -2,7 +2,9 @@
 
 Official Python client for the [Epsilab](https://www.epsilab.com) model evaluation and improvement platform.
 
-Epsilab evaluates AI models on real-world workflows, identifies capability gaps, and generates targeted training data to close those gaps.
+## What is Epsilab?
+
+Epsilab runs model and harness evaluations on workflow-level tasks, detects recurring capability gaps, and exports evals, trajectories, preference data, SFT examples, and regression tests. Training-data exports anonymize model identities by default using labels such as `target_model` and `reference_A`.
 
 ## Installation
 
@@ -25,9 +27,9 @@ from epsilab import Epsilab
 
 client = Epsilab(api_key="sk-...")
 
-# Compare multiple models in one evaluation
+# Compare multiple models in one evaluation (use any OpenRouter model slug)
 eval_result = client.create_evaluation(
-    ["openai/gpt-4o", "anthropic/claude-sonnet-4-20250514", "google/gemini-2.5-flash"],
+    ["provider/model-a", "provider/model-b", "provider/model-c"],
     name="Frontier comparison",
     max_tasks=25,
 )
@@ -41,7 +43,7 @@ print(f"Completed: {run.task_count} tasks, {run.gap_count} gaps found")
 for gap in client.get_gaps(run.run_id):
     print(f"  {gap.capability}: alpha={gap.alpha_score:.3f}")
 
-# Export targeted training data
+# Export targeted training data (model identities are anonymized by default)
 client.export_run(run.run_id, format="dpo", path="output/dpo_pairs.jsonl")
 ```
 
@@ -68,18 +70,18 @@ client = Epsilab(load_dotenv=True)
 Compare multiple models side-by-side on the same task set:
 
 ```python
-# Simple: just pass model IDs
+# Simple: just pass model IDs (any OpenRouter-compatible slug)
 eval_result = client.create_evaluation(
-    ["openai/gpt-4o", "google/gemini-2.5-flash", "deepseek/deepseek-v4-flash"],
+    ["provider/model-a", "provider/model-b", "provider/model-c"],
     name="Three-way comparison",
 )
 
 # Advanced: per-model harness overrides
 eval_result = client.create_evaluation(
     [
-        {"model_id": "openai/gpt-4o", "harness": "codex"},
-        {"model_id": "anthropic/claude-sonnet-4-20250514", "harness": "openhands"},
-        "google/gemini-2.5-flash",  # uses default_harness
+        {"model_id": "provider/model-a", "harness": "codex"},
+        {"model_id": "provider/model-b", "harness": "openhands"},
+        "provider/model-c",  # uses default_harness
     ],
     default_harness="codex",
     max_tasks=50,
@@ -88,7 +90,7 @@ eval_result = client.create_evaluation(
 
 # Check cost before running
 estimate = client.estimate_evaluation_cost(
-    ["openai/gpt-4o", "anthropic/claude-sonnet-4-20250514"],
+    ["provider/model-a", "provider/model-b"],
     max_tasks=25,
 )
 print(f"Cost: {estimate.total_credits} credits (balance: {estimate.balance})")
@@ -109,7 +111,7 @@ run = client.create_run(
 )
 ```
 
-Your model credentials are used only during the evaluation and are never stored.
+Your model credentials are used only during the evaluation and are never stored. Training-data exports anonymize model identities by default using labels such as `target_model` and `reference_A`.
 
 ## Client Methods
 
@@ -206,7 +208,7 @@ Your model credentials are used only during the evaluation and are never stored.
 | `yaml` | YAML configuration for reproduction |
 | `pytest` | Pytest test cases from capability gaps |
 
-Training data exports use anonymized model labels (e.g. `target_model`, `reference_A`) rather than real model identifiers. Evaluation prompts are included for enterprise accounts; standard accounts receive task ID references.
+Training data exports use anonymized model labels (e.g. `target_model`, `reference_A`) rather than real model identifiers. Chosen/reference answers are verified gold answers, not raw model outputs. Evaluation prompts are included for enterprise accounts; standard accounts receive task ID references.
 
 ## Automatic Retries
 
@@ -248,7 +250,7 @@ from epsilab import Epsilab, AuthError, InsufficientCreditsError, RateLimitError
 client = Epsilab(api_key="sk-...")
 
 try:
-    eval_result = client.create_evaluation(["openai/gpt-4o", "google/gemini-2.5-flash"])
+    eval_result = client.create_evaluation(["provider/model-a", "provider/model-b"])
 except AuthError:
     print("Invalid API key")
 except InsufficientCreditsError as e:
