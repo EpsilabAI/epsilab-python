@@ -1,250 +1,376 @@
+"""Data models returned by the Epsilab API.
+
+All models are plain ``dataclasses`` with ``from_dict`` / ``to_dict``
+helpers for JSON round-tripping. Import them directly or via
+``epsilab.models``:
+
+    >>> from epsilab.models import RunSummary, GapSummary
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional
 import json
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional
+
+
+# ── Evaluation runs ──────────────────────────────────────────────────
 
 
 @dataclass
-class PortfolioSignal:
-    symbol: str
-    signal_type: str
-    strength: Optional[float] = None
-    timestamp: Optional[str] = None
-    date: Optional[str] = None
+class RunSummary:
+    """Status and metadata for an evaluation run.
 
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "PortfolioSignal":
-        return PortfolioSignal(
-            symbol=str(d.get("symbol") or ""),
-            signal_type=str(d.get("signalType") or d.get("signal_type") or d.get("type") or "").upper(),
-            strength=(None if d.get("strength") is None else float(d.get("strength"))),
-            timestamp=(d.get("signalTimestamp") or d.get("signal_timestamp")),
-            date=(d.get("signalDate") or d.get("signal_date")),
-        )
+    Attributes:
+        run_id: Unique identifier for this run.
+        status: Current state — ``queued``, ``running``, ``completed``,
+            ``failed``, or ``cancelled``.
+        name: Human-readable display name.
+        target_model: The primary model being evaluated.
+        reference_models: Models used for comparison.
+        task_count: Number of tasks in the evaluation.
+        gap_count: Number of capability gaps found.
+        error: Error message if the run failed.
+        summary: Aggregated statistics (cost, tokens, latency per model).
+        created_at: ISO-8601 creation timestamp.
+        started_at: ISO-8601 timestamp when execution began.
+        completed_at: ISO-8601 timestamp when execution finished.
+    """
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), separators=(",", ":"))
-
-    def log(self) -> str:
-        base = f"{self.symbol} {self.signal_type}"
-        if self.strength is not None:
-            base += f" {self.strength}"
-        return base
-
-
-@dataclass
-class PortfolioWeight:
-    symbol: str
-    final_weight: Optional[float] = None
-    raw_weight: Optional[float] = None
-    timestamp: Optional[str] = None
-    date: Optional[str] = None
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "PortfolioWeight":
-        return PortfolioWeight(
-            symbol=str(d.get("symbol") or ""),
-            final_weight=(None if d.get("final_weight") is None else float(d.get("final_weight"))),
-            raw_weight=(None if d.get("raw_weight") is None else float(d.get("raw_weight"))),
-            timestamp=(d.get("weightTimestamp") or d.get("weight_timestamp")),
-            date=(d.get("weightDate") or d.get("weight_date")),
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), separators=(",", ":"))
-
-    def log(self) -> str:
-        val = self.final_weight if self.final_weight is not None else self.raw_weight
-        return f"{self.symbol}:{val}"
-
-
-@dataclass
-class PortfolioTrade:
-    id: str
-    symbol: str
-    side: str
-    qty: Optional[float]
-    planned_price: Optional[float]
-    planned_at: Optional[str]
+    run_id: str
     status: str
-    reasoning: Optional[str]
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "PortfolioTrade":
-        return PortfolioTrade(
-            id=str(d.get("id") or ""),
-            symbol=str(d.get("symbol") or ""),
-            side=str(d.get("side") or "").upper(),
-            qty=(None if d.get("qty") is None else float(d.get("qty"))),
-            planned_price=(None if d.get("planned_price") is None else float(d.get("planned_price"))),
-            planned_at=(d.get("planned_at") or None),
-            status=str(d.get("status") or "").upper(),
-            reasoning=d.get("reasoning"),
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), separators=(",", ":"))
-
-    def log(self) -> str:
-        return f"{self.symbol} {self.side} {self.status} x{self.qty}"
-
-
-@dataclass
-class PortfolioMember:
-    strategy_id: str
-    effective_weight: Optional[float]
     name: Optional[str] = None
-    visibility: Optional[str] = None
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "PortfolioMember":
-        return PortfolioMember(
-            strategy_id=str(d.get("strategy_id") or ""),
-            effective_weight=(None if d.get("effective_weight") is None else float(d.get("effective_weight"))),
-            name=d.get("name"),
-            visibility=d.get("visibility"),
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), separators=(",", ":"))
-
-    def log(self) -> str:
-        return f"{self.name or self.strategy_id}:{self.effective_weight}"
-
-
-@dataclass
-class EquityPoint:
-    date: str
-    value: float
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "EquityPoint":
-        return EquityPoint(
-            date=str(d.get("date") or ""),
-            value=float(d.get("value") or 0.0),
-        )
+    target_model: Optional[str] = None
+    reference_models: Optional[List[str]] = None
+    task_count: int = 0
+    gap_count: int = 0
+    error: Optional[str] = None
+    summary: Optional[Dict[str, Any]] = None
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), separators=(",", ":"))
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
 
-    def log(self) -> str:
-        return f"{self.date} {self.value}"
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RunSummary":
+        return cls(
+            run_id=data["run_id"],
+            status=data["status"],
+            name=data.get("name"),
+            target_model=data.get("target_model"),
+            reference_models=data.get("reference_models"),
+            task_count=data.get("task_count", 0),
+            gap_count=data.get("gap_count", 0),
+            error=data.get("error"),
+            summary=data.get("summary"),
+            created_at=data.get("created_at"),
+            started_at=data.get("started_at"),
+            completed_at=data.get("completed_at"),
+        )
+
+
+# ── Gaps and artifacts ───────────────────────────────────────────────
 
 
 @dataclass
-class LiveStatus:
-    latest_run_id: Optional[str]
-    timeframe: Optional[str]
-    next_eta_minutes: Optional[float]
-    counts: Dict[str, int]
+class GapSummary:
+    """A capability gap found during evaluation.
 
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "LiveStatus":
-        lr = (d or {}).get("latestRun") or {}
-        return LiveStatus(
-            latest_run_id=(lr.get("id") if isinstance(lr, dict) else None),
-            timeframe=(lr.get("timeframe") if isinstance(lr, dict) else None),
-            next_eta_minutes=(None if d.get("nextEtaMinutes") is None else float(d.get("nextEtaMinutes"))),
-            counts={k: int(v) for k, v in ((d.get("counts") or {}).items())},
-        )
+    Attributes:
+        gap_id: Unique identifier for this gap.
+        capability: The capability area (e.g. ``"coding"``, ``"math"``).
+        alpha_score: Composite gap severity score (0.0–1.0).
+        target_score: Your model's score on this capability.
+        reference_score: Best reference model's score.
+        priority: Gap priority level (``critical``, ``high``,
+            ``medium``, ``low``).
+        description: Human-readable description of the gap.
+    """
+
+    gap_id: str
+    capability: str
+    alpha_score: float
+    target_score: float
+    reference_score: float
+    priority: Optional[str] = None
+    description: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), separators=(",", ":"))
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
 
-    def log(self) -> str:
-        return f"runId={self.latest_run_id} tf={self.timeframe} nextEtaMin={self.next_eta_minutes} counts={self.counts}"
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GapSummary":
+        return cls(
+            gap_id=data["gap_id"],
+            capability=data["capability"],
+            alpha_score=data.get("alpha_score", 0.0),
+            target_score=data.get("target_score", 0.0),
+            reference_score=data.get("reference_score", 0.0),
+            priority=data.get("priority"),
+            description=data.get("description"),
+        )
 
 
 @dataclass
-class LiveLatest:
-    run_id: Optional[str]
-    timeframe: Optional[str]
-    signals: List[PortfolioSignal]
-    weights: List[PortfolioWeight]
-    fresh: Optional[bool]
-    recomputed: Optional[bool]
+class ArtifactSummary:
+    """A generated training artifact (e.g. preference pair, test case).
 
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "LiveLatest":
-        results = (d or {}).get("results") or {}
-        run_id = d.get("runId") or None
-        tf = d.get("timeframe") or None
-        sigs = parse_signals(results)
-        wts = parse_weights(results)
-        return LiveLatest(
-            run_id=run_id,
-            timeframe=tf,
-            signals=sigs,
-            weights=wts,
-            fresh=d.get("fresh"),
-            recomputed=d.get("recomputed"),
-        )
+    Attributes:
+        artifact_id: Unique identifier.
+        artifact_type: Type of artifact (``preference_pair``,
+            ``gold_answer``, ``test_case``, etc.).
+        gap_id: The gap this artifact addresses, if any.
+        content: Artifact payload (prompt, chosen/rejected, etc.).
+        metadata: Additional metadata about the artifact.
+    """
+
+    artifact_id: str
+    artifact_type: str
+    gap_id: Optional[str] = None
+    content: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "timeframe": self.timeframe,
-            "signals": [s.to_dict() for s in self.signals],
-            "weights": [w.to_dict() for w in self.weights],
-            "fresh": self.fresh,
-            "recomputed": self.recomputed,
-        }
+        return asdict(self)
 
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), separators=(",", ":"))
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
 
-    def log(self) -> str:
-        return (
-            f"runId={self.run_id} tf={self.timeframe} "
-            f"signals={len(self.signals)} weights={len(self.weights)} fresh={self.fresh} recomputed={self.recomputed}"
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ArtifactSummary":
+        return cls(
+            artifact_id=data["artifact_id"],
+            artifact_type=data["artifact_type"],
+            gap_id=data.get("gap_id"),
+            content=data.get("content", {}),
+            metadata=data.get("metadata", {}),
         )
 
 
-def parse_signals(payload: Dict[str, Any]) -> List[PortfolioSignal]:
-    rows = (payload or {}).get("signals", []) if isinstance(payload, dict) else []
-    return [PortfolioSignal.from_dict(r) for r in rows]
+# ── Custom tasks ─────────────────────────────────────────────────────
 
 
-def parse_weights(payload: Dict[str, Any]) -> List[PortfolioWeight]:
-    rows = (payload or {}).get("weights", []) if isinstance(payload, dict) else []
-    return [PortfolioWeight.from_dict(r) for r in rows]
+@dataclass
+class CustomTaskUploadResult:
+    """Result of uploading custom evaluation tasks.
+
+    Attributes:
+        uploaded: Number of tasks successfully uploaded.
+        task_ids: IDs assigned to the uploaded tasks.
+        task_names: Names of the uploaded tasks.
+        skipped_duplicates: Number of duplicate tasks skipped.
+        source: Task source label (always ``"custom"``).
+    """
+
+    uploaded: int
+    task_ids: List[str]
+    task_names: List[str]
+    skipped_duplicates: int = 0
+    source: str = "custom"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CustomTaskUploadResult":
+        return cls(
+            uploaded=data["uploaded"],
+            task_ids=data.get("task_ids", []),
+            task_names=data.get("task_names", []),
+            skipped_duplicates=data.get("skipped_duplicates", 0),
+            source=data.get("source", "custom"),
+        )
 
 
-def parse_trades(payload: Dict[str, Any]) -> List[PortfolioTrade]:
-    rows = (payload or {}).get("trades", []) if isinstance(payload, dict) else []
-    return [PortfolioTrade.from_dict(r) for r in rows]
+# ── Usage and billing ────────────────────────────────────────────────
 
 
-def parse_members(payload: Dict[str, Any]) -> List[PortfolioMember]:
-    rows = (payload or {}).get("members", []) if isinstance(payload, dict) else []
-    return [PortfolioMember.from_dict(r) for r in rows]
+@dataclass
+class UsageRecord:
+    """Monthly usage summary.
+
+    Attributes:
+        period: Month in ``YYYY-MM`` format.
+        run_count: Number of evaluation runs.
+        total_prompt_tokens: Total prompt tokens consumed.
+        total_completion_tokens: Total completion tokens consumed.
+        total_cost_usd: Total API cost in USD.
+    """
+
+    period: str
+    run_count: int = 0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_cost_usd: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UsageRecord":
+        return cls(
+            period=data["period"],
+            run_count=data.get("run_count", 0),
+            total_prompt_tokens=data.get("total_prompt_tokens", 0),
+            total_completion_tokens=data.get("total_completion_tokens", 0),
+            total_cost_usd=data.get("total_cost_usd", 0.0),
+        )
 
 
-def parse_equity(payload: Dict[str, Any]) -> List[EquityPoint]:
-    rows = (payload or {}).get("series", []) if isinstance(payload, dict) else []
-    return [EquityPoint.from_dict(r) for r in rows]
+# ── Multi-model evaluations ─────────────────────────────────────────
 
 
-def parse_live_latest(payload: Dict[str, Any]) -> LiveLatest:
-    return LiveLatest.from_dict(payload or {})
+@dataclass
+class ModelEstimate:
+    """Per-model cost breakdown within a cost estimate.
+
+    Attributes:
+        model_id: Model identifier.
+        task_count: Number of tasks this model will be evaluated on.
+        credits: Estimated credit cost for this model.
+        fresh_tasks: Number of tasks to be newly evaluated.
+        cached_tasks: Number of tasks with existing results.
+        usd_per_task: Estimated USD cost per task.
+        usd_total: Estimated total USD API cost.
+    """
+
+    model_id: str
+    task_count: int
+    credits: int
+    fresh_tasks: int = 0
+    cached_tasks: int = 0
+    usd_per_task: Optional[float] = None
+    usd_total: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ModelEstimate":
+        return cls(
+            model_id=data["model_id"],
+            task_count=data.get("task_count", 0),
+            credits=data.get("credits", 0),
+            fresh_tasks=data.get("fresh_tasks", 0),
+            cached_tasks=data.get("cached_tasks", 0),
+            usd_per_task=data.get("usd_per_task"),
+            usd_total=data.get("usd_total"),
+        )
 
 
+@dataclass
+class CostEstimate:
+    """Estimated cost for a planned evaluation.
+
+    Returned by :meth:`~epsilab.Epsilab.estimate_evaluation_cost`.
+
+    Attributes:
+        task_count: Total number of tasks in the evaluation.
+        total_credits: Total credit cost across all models.
+        balance: Current account credit balance.
+        sufficient: Whether the balance covers the cost.
+        per_model: Breakdown by model.
+    """
+
+    task_count: int
+    total_credits: int
+    balance: int
+    sufficient: bool
+    per_model: List[ModelEstimate] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d["per_model"] = [m.to_dict() for m in self.per_model]
+        return d
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CostEstimate":
+        return cls(
+            task_count=data.get("task_count", 0),
+            total_credits=data.get("total_credits", 0),
+            balance=data.get("balance", 0),
+            sufficient=data.get("sufficient", False),
+            per_model=[ModelEstimate.from_dict(m) for m in data.get("per_model", [])],
+        )
+
+
+@dataclass
+class EvaluationRunResult:
+    """Individual run created as part of a multi-model evaluation.
+
+    Attributes:
+        run_id: Unique run identifier.
+        model_id: The model being evaluated in this run.
+        harness: Agent harness used, if any.
+        status: Current run status.
+        estimated_credits: Estimated credit cost for this run.
+    """
+
+    run_id: str
+    model_id: str
+    harness: Optional[str] = None
+    status: str = "pending"
+    estimated_credits: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EvaluationRunResult":
+        return cls(
+            run_id=data["run_id"],
+            model_id=data["model_id"],
+            harness=data.get("harness"),
+            status=data.get("status", "pending"),
+            estimated_credits=data.get("estimated_credits", 0),
+        )
+
+
+@dataclass
+class EvaluationResult:
+    """Result from creating a multi-model evaluation.
+
+    Returned by :meth:`~epsilab.Epsilab.create_evaluation`.
+
+    Attributes:
+        evaluation_id: Unique evaluation identifier.
+        name: Display name for the evaluation.
+        total_models: Number of models in the evaluation.
+        total_estimated_credits: Total estimated credit cost.
+        runs: Individual runs created for this evaluation.
+    """
+
+    evaluation_id: str
+    name: Optional[str]
+    total_models: int
+    total_estimated_credits: int
+    runs: List[EvaluationRunResult] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d["runs"] = [r.to_dict() for r in self.runs]
+        return d
+
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EvaluationResult":
+        return cls(
+            evaluation_id=data["evaluation_id"],
+            name=data.get("name"),
+            total_models=data.get("total_models", 0),
+            total_estimated_credits=data.get("total_estimated_credits", 0),
+            runs=[EvaluationRunResult.from_dict(r) for r in data.get("runs", [])],
+        )

@@ -1,0 +1,7 @@
+# Don't index secrets or credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/

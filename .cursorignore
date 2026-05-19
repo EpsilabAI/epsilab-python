@@ -1,4 +1,4 @@
-# Secrets and credentials
+# Secrets and credentials — NEVER read these
 .env
 .env.*
 !.env.example
@@ -8,21 +8,20 @@
 *.pfx
 secrets/
 
-# Python
+# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.hypothesis/
 
 # Virtual environments
 .venv/
 venv/
 env/
 
-# Build
+# Build artifacts
 dist/
 build/
 *.egg-info/
@@ -40,9 +39,3 @@ Thumbs.db
 # Logs
 *.log
 *.logs
-
-# Benchmarks
-.benchmarks/
-
-# Export output
-output/

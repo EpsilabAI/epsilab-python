@@ -1,108 +1,103 @@
-import os
-import time
-from datetime import datetime, timezone
+"""Example: evaluate models and explore results via the Epsilab SDK.
 
-try:
-    from dotenv import load_dotenv  # type: ignore
-except Exception:
-    load_dotenv = None
+Usage:
+    1. Copy ``.env.example`` to ``.env`` and add your API key.
+    2. Run ``python examples/example.py``.
+
+The example first checks for existing completed runs to avoid
+unnecessary charges. If none exist, it creates a small single-model
+run using a free model (if available) with only 5 tasks.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
 
 from epsilab import Epsilab
 
 
-def main():
-    if load_dotenv is not None:
-        try:
-            load_dotenv()
-        except Exception:
-            pass
+def _find_free_model(client: Epsilab) -> Optional[str]:
+    """Return the ID of a free model, or None."""
+    data = client.list_models(limit=200)
+    for m in data.get("models", []):
+        prompt = m.get("prompt_cost_per_m") or 0
+        completion = m.get("completion_cost_per_m") or 0
+        if prompt == 0 and completion == 0:
+            return m["model_id"]
+    return None
 
-    api_key = os.getenv("EPSILAB_API_KEY")
-    api_base = os.getenv("EPSILAB_API_BASE", "https://www.epsilab.ai/api/ext/v1")
 
-    if not api_key:
-        print("EPSILAB_API_KEY not set. Create an API key in Account Settings and export it.")
-        return
+def main() -> None:
+    client = Epsilab(load_dotenv=True)
 
-    client = Epsilab(api_base=api_base, api_key=api_key)
+    # ── Find or create a run ──────────────────────────────────────────
 
-    start = time.time()
-    iterations = 5  # 5 * 5s = 25s
-    print(f"Polling live portfolio for ~{iterations * 5} seconds (every 5s)...\n")
-    try:
-        for i in range(iterations):
-            try:
-                ts = datetime.now(timezone.utc).isoformat()
-                latest = client.get_live_latest(return_results_if_fresh=True)
-                status = client.get_live_status()
+    runs = client.list_runs(status="completed", limit=1)
 
-                # Determine run id and timeframe
-                run_id = latest.run_id or status.latest_run_id
-                timeframe = status.timeframe or latest.timeframe
+    if runs:
+        run = runs[0]
+        print(f"Using existing run: {run.run_id}")
+    else:
+        print("No completed runs found — creating a small run...")
 
-                # Fetch live data for this (or latest) run
-                signals = client.get_portfolio_signals(run_id=run_id, limit=200)
-                weights = client.get_portfolio_weights(run_id=run_id, limit=200)
-                trades = client.get_live_trades(status="PENDING,EXECUTED,CLOSED", include_positions=False, limit=200)
-                equity = client.get_live_equity(limit=200)
-                members = client.get_live_members(run_id=run_id)
+        free_model = _find_free_model(client)
+        model_id = free_model or "google/gemini-2.5-flash"
+        if free_model:
+            print(f"Found free model: {model_id}")
+        else:
+            print(f"No free models available, using: {model_id}")
 
-                next_eta = status.next_eta_minutes
-                sig_rows = signals
-                wt_rows = weights
-                tr_rows = trades
-                eq_series = equity
-                mem_rows = members
+        estimate = client.estimate_evaluation_cost(
+            [model_id],
+            max_tasks=5,
+        )
+        print(f"Estimated cost: {estimate.total_credits} credits")
+        if not estimate.sufficient:
+            print(f"Insufficient credits (balance: {estimate.balance}). "
+                  "Please add credits and try again.")
+            return
 
-                # Build samples for easy inspection
-                def _sample_sig(r) -> str:
-                    return r.log()
+        run = client.create_run(model_id, max_tasks=5)
+        print(f"Run started: {run.run_id}")
 
-                def _sample_wt(r) -> str:
-                    return r.log()
+        run = client.wait_for_completion(run.run_id, poll_interval=10)
+        print(f"Completed: {run.task_count} tasks, {run.gap_count} gaps")
 
-                def _sample_tr(r) -> str:
-                    return r.log()
+    run_id = run.run_id
 
-                def _sample_mem(r) -> str:
-                    return r.log()
+    # ── Inspect results ───────────────────────────────────────────────
 
-                eq_last = (eq_series[-1] if eq_series else None)
-                eq_last_str = (eq_last.log() if eq_last else "n/a")
+    print(f"\nRun {run_id}: {run.task_count} tasks, {run.gap_count} gaps")
 
-                print(f"[{ts}] runId={run_id} tf={timeframe} nextEtaMin={next_eta}")
-                print(
-                    f"  signals: {len(sig_rows)} | sample: " + ", ".join(map(_sample_sig, sig_rows[:2]))
-                )
-                print(
-                    f"  weights: {len(wt_rows)} | sample: " + ", ".join(map(_sample_wt, wt_rows[:2]))
-                )
-                print(
-                    f"  trades : {len(tr_rows)} | sample: " + ", ".join(map(_sample_tr, tr_rows[:2]))
-                )
-                print(
-                    f"  members: {len(mem_rows)} | sample: " + ", ".join(map(_sample_mem, mem_rows[:2]))
-                )
-                print(
-                    f"  equity : {len(eq_series)} pts | last: {eq_last_str}"
-                )
-            except Exception as e:
-                print(f"Error during poll: {e}")
+    gaps = client.get_gaps(run_id)
+    for gap in gaps:
+        print(f"  Gap: {gap.capability}  alpha={gap.alpha_score:.3f}  "
+              f"priority={gap.priority}")
 
-            # Wait ~5 seconds between polls
-            try:
-                time.sleep(5)
-            except KeyboardInterrupt:
-                print("Interrupted by user during sleep. Exiting...")
-                break
-    except KeyboardInterrupt:
-        print("Interrupted by user. Exiting...")
+    insights = client.get_insights(run_id)
+    for model in insights.get("model_performance", []):
+        alias = model.get("alias", model.get("model_id", "?"))
+        score = model.get("mean_score", 0)
+        print(f"  {alias}: {score:.1%}")
 
-    elapsed = time.time() - start
-    print(f"\nDone. Elapsed ~{int(elapsed)}s.")
+    artifacts = client.get_artifacts(run_id)
+    print(f"\n{len(artifacts)} artifacts generated")
+
+    # ── Export training data ──────────────────────────────────────────
+
+    if artifacts:
+        client.export_run(run_id, format="dpo", path="output/dpo_pairs.jsonl")
+        print("Exported DPO pairs to output/dpo_pairs.jsonl")
+
+    # ── Billing ───────────────────────────────────────────────────────
+
+    balance = client.get_credit_balance()
+    print(f"\nCredits remaining: {balance.get('balance', 0)}")
+
+    for usage in client.get_usage():
+        print(f"  {usage.period}: {usage.run_count} runs, "
+              f"${usage.total_cost_usd:.2f}")
 
 
 if __name__ == "__main__":
     main()
-
-
