@@ -31,10 +31,15 @@ class RunSummary:
         task_count: Number of tasks in the evaluation.
         gap_count: Number of capability gaps found.
         error: Error message if the run failed.
-        summary: Aggregated statistics (cost, tokens, latency per model).
         created_at: ISO-8601 creation timestamp.
         started_at: ISO-8601 timestamp when execution began.
         completed_at: ISO-8601 timestamp when execution finished.
+        progress: Progress details when the run is active (tasks
+            completed/total, percent, elapsed/remaining seconds).
+        estimated_credits: Estimated credit cost for this run.
+        resumed_from: Run ID this was resumed/retried from, if any.
+        evaluation_id: Parent evaluation ID, if part of a multi-model
+            evaluation.
     """
 
     run_id: str
@@ -45,10 +50,13 @@ class RunSummary:
     task_count: int = 0
     gap_count: int = 0
     error: Optional[str] = None
-    summary: Optional[Dict[str, Any]] = None
     created_at: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    progress: Optional[Dict[str, Any]] = None
+    estimated_credits: Optional[int] = None
+    resumed_from: Optional[str] = None
+    evaluation_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -67,10 +75,13 @@ class RunSummary:
             task_count=data.get("task_count", 0),
             gap_count=data.get("gap_count", 0),
             error=data.get("error"),
-            summary=data.get("summary"),
             created_at=data.get("created_at"),
             started_at=data.get("started_at"),
             completed_at=data.get("completed_at"),
+            progress=data.get("progress"),
+            estimated_credits=data.get("estimated_credits"),
+            resumed_from=data.get("resumed_from"),
+            evaluation_id=data.get("evaluation_id"),
         )
 
 

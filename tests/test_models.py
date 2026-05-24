@@ -27,21 +27,31 @@ class TestRunSummary:
         assert r.task_count == 0
         assert r.target_model is None
         assert r.reference_models is None
-        assert r.summary is None
+        assert r.progress is None
+        assert r.estimated_credits is None
+        assert r.evaluation_id is None
 
     def test_from_dict_full(self):
         r = RunSummary.from_dict({
             "run_id": "r1", "status": "completed",
+            "name": "test eval",
             "target_model": "openai/gpt-4o",
             "reference_models": ["google/gemini-2.5-flash", "deepseek/deepseek-v4-flash"],
             "task_count": 10, "gap_count": 3,
-            "summary": {"model_stats": {"openai/gpt-4o": {"total_cost_usd": 0.05}}},
             "created_at": "2026-05-01T00:00:00",
+            "estimated_credits": 40,
+            "resumed_from": "r0",
+            "evaluation_id": "ev-1",
+            "progress": {"tasks_completed": 10, "tasks_total": 10, "percent": 100.0},
         })
         assert r.gap_count == 3
+        assert r.name == "test eval"
         assert r.target_model == "openai/gpt-4o"
         assert len(r.reference_models) == 2
-        assert r.summary["model_stats"]["openai/gpt-4o"]["total_cost_usd"] == 0.05
+        assert r.estimated_credits == 40
+        assert r.resumed_from == "r0"
+        assert r.evaluation_id == "ev-1"
+        assert r.progress["percent"] == 100.0
         assert r.created_at == "2026-05-01T00:00:00"
 
     def test_roundtrip(self):

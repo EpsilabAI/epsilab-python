@@ -93,7 +93,8 @@ class TestGetRun:
                         "gap_count": 5,
                         "target_model": "openai/gpt-4o",
                         "reference_models": ["google/gemini-2.5-flash"],
-                        "summary": {"model_stats": {}},
+                        "estimated_credits": 40,
+                        "evaluation_id": "ev-1",
                     }
                 )
             )
@@ -104,7 +105,8 @@ class TestGetRun:
         assert run.gap_count == 5
         assert run.target_model == "openai/gpt-4o"
         assert run.reference_models == ["google/gemini-2.5-flash"]
-        assert run.summary is not None
+        assert run.estimated_credits == 40
+        assert run.evaluation_id == "ev-1"
 
     def test_url_encodes_run_id(self):
         captured = {}

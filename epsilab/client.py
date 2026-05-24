@@ -462,7 +462,11 @@ class EpsilabClient:
         return RunSummary.from_dict(data)
 
     def delete_run(self, run_id: str) -> None:
-        """Delete a run and its associated data."""
+        """Delete a run and its associated results.
+
+        Data may be recoverable for a limited time — contact support
+        if you need to restore a deleted run.
+        """
         self._request("DELETE", f"/v1/runs/{self._path_segment(run_id)}")
 
     def wait_for_completion(

@@ -11,6 +11,7 @@ run using a free model (if available) with only 5 tasks.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from epsilab import Epsilab
@@ -86,7 +87,9 @@ def main() -> None:
     # ── Export training data ──────────────────────────────────────────
 
     if artifacts:
-        client.export_run(run_id, format="dpo", path="output/dpo_pairs.jsonl")
+        out = Path("output")
+        out.mkdir(exist_ok=True)
+        client.export_run(run_id, format="dpo", path=str(out / "dpo_pairs.jsonl"))
         print("Exported DPO pairs to output/dpo_pairs.jsonl")
 
     # ── Billing ───────────────────────────────────────────────────────
