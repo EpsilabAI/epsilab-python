@@ -224,6 +224,54 @@ class TestExportRun:
         assert "prompt" in result
 
 
+class TestStreamExport:
+    def test_to_memory(self):
+        ndjson = '{"prompt":"a","chosen":"b"}\n{"prompt":"c","chosen":"d"}\n'
+        client = _make_client(
+            httpx.MockTransport(
+                lambda req: httpx.Response(200, text=ndjson, request=req)
+            )
+        )
+
+        result = client.stream_export("r1", "dpo")
+        assert isinstance(result, str)
+        assert "prompt" in result
+
+    def test_to_file(self, tmp_path):
+        ndjson = '{"prompt":"a"}\n'
+        client = _make_client(
+            httpx.MockTransport(
+                lambda req: httpx.Response(200, text=ndjson, request=req)
+            )
+        )
+
+        out = tmp_path / "streamed.jsonl"
+        result = client.stream_export("r1", "sft", path=str(out))
+        assert result is None
+        assert out.exists()
+
+    def test_filter_params(self):
+        def handler(req):
+            assert "min_score_gap" in str(req.url)
+            assert "min_chosen_score" in str(req.url)
+            return httpx.Response(200, text="{}\n", request=req)
+
+        client = _make_client(httpx.MockTransport(handler))
+        client.stream_export(
+            "r1", "dpo",
+            min_score_gap=0.2,
+            min_chosen_score=0.5,
+        )
+
+    def test_uses_stream_endpoint(self):
+        def handler(req):
+            assert "/export/stream" in str(req.url)
+            return httpx.Response(200, text="{}\n", request=req)
+
+        client = _make_client(httpx.MockTransport(handler))
+        client.stream_export("r1", "grpo")
+
+
 class TestResumeRun:
     def test_success(self):
         client = _make_client(

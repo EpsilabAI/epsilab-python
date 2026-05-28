@@ -108,7 +108,7 @@ class EpsilabClient:
     # ── lifecycle ────────────────────────────────────────────────────
 
     def close(self) -> None:
-        self._client.close()
+            self._client.close()
 
     def __enter__(self) -> "EpsilabClient":
         return self
@@ -914,9 +914,15 @@ class EpsilabClient:
 
         Args:
             run_id: The run to export.
-            format: Export format. Training data: ``dpo``, ``quality_dpo``,
-                ``sft``, ``kto``, ``grpo``, ``sharegpt``. Other: ``report``,
-                ``yaml``, ``pytest``, ``jsonl``, ``all``.
+            format: Export format. One of:
+
+                Training data:
+                    ``dpo``, ``quality_dpo``, ``sft``, ``kto``, ``grpo``,
+                    ``sharegpt``, ``process_supervision``.
+                Raw:
+                    ``jsonl``, ``artifacts``.
+                Other:
+                    ``report``, ``yaml``, ``pytest``, ``all`` (zip archive).
             path: If provided, write the response to this file path.
 
         Returns:
@@ -935,6 +941,64 @@ class EpsilabClient:
             "GET",
             f"/v1/runs/{self._path_segment(run_id)}/export",
             params={"format": format},
+        )
+        return text
+
+    def stream_export(
+        self,
+        run_id: str,
+        format: str,
+        *,
+        path: Optional[str] = None,
+        min_score_gap: Optional[float] = None,
+        min_chosen_score: Optional[float] = None,
+        max_rejected_score: Optional[float] = None,
+    ) -> Any:
+        """Stream training data as newline-delimited JSON (NDJSON).
+
+        Like :meth:`export_run` but uses the streaming endpoint, which
+        avoids buffering the full dataset in memory. Supports quality
+        filter parameters.
+
+        Only line-based formats are supported: ``jsonl``, ``dpo``,
+        ``quality_dpo``, ``sft``, ``kto``, ``grpo``, ``sharegpt``,
+        ``process_supervision``.
+
+        Args:
+            run_id: The run to export.
+            format: Export format (see above).
+            path: If provided, stream the response to this file path.
+            min_score_gap: Only include pairs where the chosen/rejected
+                score gap exceeds this threshold.
+            min_chosen_score: Only include pairs where the chosen score
+                is at least this value.
+            max_rejected_score: Only include pairs where the rejected
+                score is at most this value.
+
+        Returns:
+            The raw NDJSON text, or *None* if *path* was provided.
+        """
+        params: Dict[str, Any] = {"format": format}
+        if min_score_gap is not None:
+            params["min_score_gap"] = min_score_gap
+        if min_chosen_score is not None:
+            params["min_chosen_score"] = min_chosen_score
+        if max_rejected_score is not None:
+            params["max_rejected_score"] = max_rejected_score
+
+        if path:
+            p = Path(path)
+            self._stream_raw_to_path(
+                "GET",
+                f"/v1/runs/{self._path_segment(run_id)}/export/stream",
+                p,
+                params=params,
+            )
+            return None
+        text = self._request_raw(
+            "GET",
+            f"/v1/runs/{self._path_segment(run_id)}/export/stream",
+            params=params,
         )
         return text
 

@@ -101,6 +101,10 @@ class GapSummary:
         priority: Gap priority level (``critical``, ``high``,
             ``medium``, ``low``).
         description: Human-readable description of the gap.
+        verification: How this gap was verified (``judge``,
+            ``execution``, ``exact_match``, ``human``).
+        review_status: Human review status (``pending``,
+            ``in_progress``, ``approved``, or ``None``).
     """
 
     gap_id: str
@@ -110,6 +114,8 @@ class GapSummary:
     reference_score: float
     priority: Optional[str] = None
     description: Optional[str] = None
+    verification: Optional[str] = None
+    review_status: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -127,6 +133,8 @@ class GapSummary:
             reference_score=data.get("reference_score", 0.0),
             priority=data.get("priority"),
             description=data.get("description"),
+            verification=data.get("verification"),
+            review_status=data.get("review_status"),
         )
 
 

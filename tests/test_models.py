@@ -76,6 +76,33 @@ class TestGapSummary:
         g = GapSummary.from_dict({"gap_id": "g1", "capability": "math"})
         assert g.alpha_score == 0.0
         assert g.description is None
+        assert g.verification is None
+        assert g.review_status is None
+
+    def test_verification_and_review_status(self):
+        g = GapSummary.from_dict({
+            "gap_id": "g1", "capability": "coding",
+            "alpha_score": 0.5, "target_score": 0.3,
+            "reference_score": 0.8,
+            "verification": "execution",
+            "review_status": "approved",
+        })
+        assert g.verification == "execution"
+        assert g.review_status == "approved"
+
+    def test_roundtrip_with_new_fields(self):
+        g = GapSummary.from_dict({
+            "gap_id": "g1", "capability": "math",
+            "alpha_score": 0.4, "target_score": 0.5,
+            "reference_score": 0.9, "priority": "high",
+            "verification": "judge", "review_status": "pending",
+        })
+        d = g.to_dict()
+        assert d["verification"] == "judge"
+        assert d["review_status"] == "pending"
+        g2 = GapSummary.from_dict(d)
+        assert g2.verification == g.verification
+        assert g2.review_status == g.review_status
 
 
 class TestArtifactSummary:
