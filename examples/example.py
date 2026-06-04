@@ -92,6 +92,24 @@ def main() -> None:
         client.export_run(run_id, format="dpo", path=str(out / "dpo_pairs.jsonl"))
         print("Exported DPO pairs to output/dpo_pairs.jsonl")
 
+        client.export_run(run_id, format="process_supervision",
+                          path=str(out / "process_supervision.jsonl"))
+        print("Exported process supervision to output/process_supervision.jsonl")
+
+    # ── Refined trajectories ─────────────────────────────────────────
+
+    refined = client.get_refined_trajectories(run_id)
+    if refined:
+        print(f"\n{len(refined)} refined trajectories available:")
+        for t in refined[:3]:
+            ratio = t.compression_ratio or 0
+            domain = t.content.get("domain", "?")
+            orig = t.content.get("original_step_count", "?")
+            new = t.content.get("refined_step_count", "?")
+            print(f"  {domain}: {orig}→{new} steps ({ratio:.0%} of original)")
+    else:
+        print("\nNo refined trajectories (requires passing workflow tasks)")
+
     # ── Billing ───────────────────────────────────────────────────────
 
     balance = client.get_credit_balance()

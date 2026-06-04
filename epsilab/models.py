@@ -144,10 +144,29 @@ class ArtifactSummary:
 
     Attributes:
         artifact_id: Unique identifier.
-        artifact_type: Type of artifact (``preference_pair``,
-            ``gold_answer``, ``test_case``, etc.).
+        artifact_type: Type of artifact. One of:
+
+            - ``preference_pair`` — DPO/RLHF chosen/rejected pair
+            - ``gold_answer`` — verified correct output (SFT-ready)
+            - ``trajectory`` — full agent execution trace
+            - ``refined_trajectory`` — compressed, verified trajectory
+              with redundant steps removed (higher quality for training)
+            - ``test_case`` — executable test
+
         gap_id: The gap this artifact addresses, if any.
         content: Artifact payload (prompt, chosen/rejected, etc.).
+            For ``refined_trajectory`` artifacts, includes:
+
+            - ``prompt`` — the original task prompt
+            - ``refined_trajectory`` — compressed step sequence
+            - ``original_step_count`` — steps before compression
+            - ``refined_step_count`` — steps after compression
+            - ``compression_ratio`` — ratio of refined/original steps
+            - ``final_output`` — model's final answer
+            - ``score`` — verification score (0-1)
+            - ``domain`` — task domain
+            - ``capability`` — capability area
+
         metadata: Additional metadata about the artifact.
     """
 
@@ -156,6 +175,18 @@ class ArtifactSummary:
     gap_id: Optional[str] = None
     content: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_refined(self) -> bool:
+        """Whether this is a refined (compressed) trajectory artifact."""
+        return self.artifact_type == "refined_trajectory"
+
+    @property
+    def compression_ratio(self) -> Optional[float]:
+        """Compression ratio for refined trajectories (0-1, lower=more compressed)."""
+        if self.artifact_type != "refined_trajectory":
+            return None
+        return self.content.get("compression_ratio")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

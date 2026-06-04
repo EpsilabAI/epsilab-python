@@ -115,6 +115,35 @@ class TestArtifactSummary:
         assert a.artifact_type == "preference_pair"
         assert a.content == {"prompt": "hello"}
 
+    def test_refined_trajectory(self):
+        a = ArtifactSummary.from_dict({
+            "artifact_id": "a2",
+            "artifact_type": "refined_trajectory",
+            "content": {
+                "prompt": "implement binary search",
+                "refined_trajectory": [{"action": "write code"}],
+                "original_step_count": 8,
+                "refined_step_count": 5,
+                "compression_ratio": 0.625,
+                "final_output": "def binary_search(arr, target): ...",
+                "score": 1.0,
+                "domain": "coding",
+                "capability": "algorithms",
+            },
+        })
+        assert a.is_refined is True
+        assert a.compression_ratio == 0.625
+        assert a.content["refined_step_count"] == 5
+
+    def test_non_refined_properties(self):
+        a = ArtifactSummary.from_dict({
+            "artifact_id": "a3",
+            "artifact_type": "preference_pair",
+            "content": {"prompt": "hello"},
+        })
+        assert a.is_refined is False
+        assert a.compression_ratio is None
+
 
 class TestCustomTaskUploadResult:
     def test_from_dict(self):

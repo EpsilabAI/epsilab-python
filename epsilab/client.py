@@ -665,7 +665,14 @@ class EpsilabClient:
 
         Args:
             run_id: The run to fetch artifacts for.
-            artifact_type: Filter by type (``preference_pair``, etc.).
+            artifact_type: Filter by type. Common values:
+
+                - ``preference_pair`` — DPO/RLHF training pairs
+                - ``gold_answer`` — verified correct outputs (SFT)
+                - ``trajectory`` — full agent execution traces
+                - ``refined_trajectory`` — compressed, verified traces
+                - ``test_case`` — executable test cases
+
             page_size: Number of artifacts to fetch per API call.
         """
         offset = 0
@@ -682,6 +689,49 @@ class EpsilabClient:
             if len(page) < page_size:
                 break
             offset += len(page)
+
+    def get_refined_trajectories(
+        self,
+        run_id: str,
+        *,
+        page_size: int = 100,
+    ) -> List[ArtifactSummary]:
+        """Get all refined trajectory artifacts for a run.
+
+        Refined trajectories are compressed, verified versions of agent
+        execution traces with redundant error-recovery cycles removed.
+        They produce higher-quality training signal than raw trajectories.
+
+        Each artifact's ``content`` includes:
+            - ``refined_trajectory``: the compressed step sequence
+            - ``compression_ratio``: how much the trajectory was reduced
+            - ``original_step_count`` / ``refined_step_count``: step counts
+            - ``prompt``, ``final_output``, ``score``, ``domain``
+
+        Args:
+            run_id: The run to fetch refined trajectories from.
+            page_size: Number of artifacts to fetch per API call.
+
+        Returns:
+            List of refined trajectory artifacts. Empty if the run
+            produced no refined trajectories (e.g. no passing workflow
+            tasks, or refinement not enabled for your tier).
+
+        Example::
+
+            trajectories = client.get_refined_trajectories(run_id)
+            for t in trajectories:
+                ratio = t.compression_ratio
+                print(f"  {t.content['domain']}: "
+                      f"{t.content['original_step_count']}→"
+                      f"{t.content['refined_step_count']} steps "
+                      f"({ratio:.0%} of original)")
+        """
+        return list(self.iter_artifacts(
+            run_id,
+            artifact_type="refined_trajectory",
+            page_size=page_size,
+        ))
 
     def get_insights(self, run_id: str) -> Dict[str, Any]:
         """Get rich analytics for a completed run.
@@ -753,6 +803,152 @@ class EpsilabClient:
     def get_precomputed_insights(self) -> Dict[str, Any]:
         """Get per-domain best-model recommendations."""
         return self._request("GET", "/v1/insights/precomputed")
+
+    # ── routing ──────────────────────────────────────────────────────
+
+    def route(
+        self,
+        prompt: str,
+        *,
+        strategy: str = "quality_first",
+        max_candidates: int = 5,
+    ) -> Dict[str, Any]:
+        """Get a model-harness recommendation for a task.
+
+        The trained router predicts which model-harness pair will score
+        best on the given prompt, based on patterns learned from past
+        evaluation results.
+
+        Args:
+            prompt: The task prompt to route.
+            strategy: Routing strategy. One of:
+
+                - ``quality_first`` (default): highest predicted score
+                - ``cost_first``: cheapest model above quality floor
+                - ``balanced``: best score/cost ratio (Pareto-efficient)
+                - ``cascade``: cheapest first (for try-cheap-escalate patterns)
+                - ``latency_first``: lowest latency, best score among ties
+            max_candidates: Number of ranked alternatives to return (1-20).
+
+        Returns:
+            Dict with:
+                - ``confidence``: prediction confidence (0-1)
+                - ``primary``: top recommended model (dict with model_id, harness, score, cost, etc.)
+                - ``candidates``: ranked list of alternatives
+                - ``strategy``: the strategy used
+                - ``explanation``: human-readable recommendation
+
+        Example::
+
+            rec = client.route("Write a Python function that validates email addresses")
+            print(rec["primary"]["model_id"])  # e.g. "anthropic/claude-opus-4.6"
+            print(rec["primary"]["harness"])   # e.g. "direct"
+        """
+        body: Dict[str, Any] = {
+            "prompt": prompt,
+            "strategy": strategy,
+            "max_candidates": max_candidates,
+        }
+        return self._request("POST", "/v1/route", json_body=body)
+
+    def get_routing_policy(self) -> Dict[str, Any]:
+        """Get summary statistics about the current routing policy.
+
+        Returns domains covered, number of models evaluated, top models
+        globally, and when the policy was last generated.
+
+        Returns:
+            Dict with ``n_models``, ``n_domains``, ``domains`` (list),
+            ``top_models`` (list), and ``generated_at``.
+        """
+        return self._request("GET", "/v1/route/policy")
+
+    def get_domain_insights(
+        self,
+        domain: str,
+        *,
+        quality_floor: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Get rich model comparison insights for a specific domain.
+
+        Answers "what's the best model for X?" with structured data
+        about best quality, cheapest passing, best value, and the
+        Pareto frontier.
+
+        Args:
+            domain: The domain to get insights for (e.g. ``"coding"``,
+                ``"law"``, ``"math"``).
+            quality_floor: Minimum score threshold (0-1) for a model to
+                be considered "passing". Default 0 (all models included).
+
+        Returns:
+            Dict with ``best_model``, ``cheapest_passing``, ``best_value``,
+            ``pareto_frontier``, ``comparison`` narrative, and counts.
+        """
+        return self._request(
+            "GET",
+            f"/v1/route/insights/{self._path_segment(domain)}",
+            params={"quality_floor": quality_floor} if quality_floor > 0 else None,
+        )
+
+    def create_routing_mask(
+        self,
+        name: str,
+        *,
+        allowed_providers: Optional[List[str]] = None,
+        blocked_providers: Optional[List[str]] = None,
+        allowed_models: Optional[List[str]] = None,
+        blocked_models: Optional[List[str]] = None,
+        max_cost_per_request_usd: Optional[float] = None,
+        min_quality_score: float = 0.0,
+        max_latency_s: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Create or update a routing mask for your organization.
+
+        A mask filters the router's output with your constraints:
+        provider whitelists, cost ceilings, quality floors, etc.
+
+        Args:
+            name: Human-readable name for this mask config.
+            allowed_providers: Only use models from these providers.
+            blocked_providers: Never use models from these providers.
+            allowed_models: Only use these specific model IDs.
+            blocked_models: Never use these specific model IDs.
+            max_cost_per_request_usd: Maximum cost per request.
+            min_quality_score: Minimum quality score (0-1).
+            max_latency_s: Maximum acceptable latency in seconds.
+
+        Returns:
+            Confirmation dict with mask ID and name.
+
+        Example::
+
+            client.create_routing_mask(
+                "production",
+                allowed_providers=["openai", "anthropic"],
+                max_cost_per_request_usd=0.05,
+                min_quality_score=0.8,
+            )
+        """
+        body: Dict[str, Any] = {
+            "name": name,
+            "allowed_providers": allowed_providers or [],
+            "blocked_providers": blocked_providers or [],
+            "allowed_models": allowed_models or [],
+            "blocked_models": blocked_models or [],
+            "max_cost_per_request_usd": max_cost_per_request_usd,
+            "min_quality_score": min_quality_score,
+            "max_latency_s": max_latency_s,
+        }
+        return self._request("POST", "/v1/route/mask", json_body=body)
+
+    def get_routing_mask(self) -> Dict[str, Any]:
+        """Get your current routing mask configuration.
+
+        Returns:
+            Dict with ``mask`` (the mask config, or None if not configured).
+        """
+        return self._request("GET", "/v1/route/mask")
 
     # ── custom tasks ──────────────────────────────────────────────────
 
@@ -923,6 +1119,13 @@ class EpsilabClient:
                     ``jsonl``, ``artifacts``.
                 Other:
                     ``report``, ``yaml``, ``pytest``, ``all`` (zip archive).
+
+                The ``sharegpt`` and ``process_supervision`` formats
+                automatically include refined trajectories when available.
+                Refined trajectories are compressed, verified versions of
+                agent execution traces — they produce higher-quality
+                training signal with fewer redundant steps.
+
             path: If provided, write the response to this file path.
 
         Returns:
@@ -963,6 +1166,10 @@ class EpsilabClient:
         Only line-based formats are supported: ``jsonl``, ``dpo``,
         ``quality_dpo``, ``sft``, ``kto``, ``grpo``, ``sharegpt``,
         ``process_supervision``.
+
+        The ``process_supervision`` format includes refined trajectory
+        records (marked with ``"refined": true``) when available. These
+        are higher-quality training signal with fewer redundant steps.
 
         Args:
             run_id: The run to export.
