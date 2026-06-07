@@ -812,6 +812,7 @@ class EpsilabClient:
         *,
         strategy: str = "quality_first",
         max_candidates: int = 5,
+        router_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get a model-harness recommendation for a task.
 
@@ -826,9 +827,12 @@ class EpsilabClient:
                 - ``quality_first`` (default): highest predicted score
                 - ``cost_first``: cheapest model above quality floor
                 - ``balanced``: best score/cost ratio (Pareto-efficient)
+                - ``selective``: quality-first but downgrades when safe (best cost/quality trade-off)
                 - ``cascade``: cheapest first (for try-cheap-escalate patterns)
                 - ``latency_first``: lowest latency, best score among ties
             max_candidates: Number of ranked alternatives to return (1-20).
+            router_name: Use a specific named custom router (e.g.
+                ``"legal-team"``). Uses your default router if omitted.
 
         Returns:
             Dict with:
@@ -843,12 +847,21 @@ class EpsilabClient:
             rec = client.route("Write a Python function that validates email addresses")
             print(rec["primary"]["model_id"])  # e.g. "anthropic/claude-opus-4.6"
             print(rec["primary"]["harness"])   # e.g. "direct"
+
+            # Use selective routing with a custom router
+            rec = client.route(
+                "Draft an NDA for software contractors",
+                strategy="selective",
+                router_name="legal-team",
+            )
         """
         body: Dict[str, Any] = {
             "prompt": prompt,
             "strategy": strategy,
             "max_candidates": max_candidates,
         }
+        if router_name:
+            body["router_name"] = router_name
         return self._request("POST", "/v1/route", json_body=body)
 
     def get_routing_policy(self) -> Dict[str, Any]:
@@ -949,6 +962,139 @@ class EpsilabClient:
             Dict with ``mask`` (the mask config, or None if not configured).
         """
         return self._request("GET", "/v1/route/mask")
+
+    def train_router(
+        self,
+        *,
+        router_name: str = "default",
+        domains: Optional[List[str]] = None,
+        cost_weight: float = 0.02,
+    ) -> Dict[str, Any]:
+        """Train a custom router using your evaluation data.
+
+        Queues a background training job. The router learns which models
+        perform best on your specific workload from your past evaluation
+        results. Requires at least 50 evaluated tasks.
+
+        Args:
+            router_name: Name for this router (e.g. ``"default"``,
+                ``"legal-team"``, ``"coding"``). Allows multiple routers
+                per organization.
+            domains: Optional domain filter — only train on tasks from
+                these domains (e.g. ``["law", "compliance"]``).
+            cost_weight: How much to penalize expensive models (0-1).
+                0 = pure quality, 1 = heavy cost preference. Default 0.02.
+
+        Returns:
+            Dict with ``job_id``, ``status`` ("queued"), ``router_name``,
+            and ``poll_url`` for checking progress.
+
+        Example::
+
+            job = client.train_router(router_name="legal-team", domains=["law"])
+            # Poll until complete
+            result = client.get_training_job(job["job_id"])
+        """
+        body: Dict[str, Any] = {
+            "router_name": router_name,
+            "cost_weight": cost_weight,
+        }
+        if domains:
+            body["domains"] = domains
+        return self._request("POST", "/v1/route/train", json_body=body)
+
+    def get_training_job(self, job_id: str) -> Dict[str, Any]:
+        """Poll the status of a router training job.
+
+        Args:
+            job_id: The job ID returned by :meth:`train_router`.
+
+        Returns:
+            Dict with ``status`` (queued/running/completed/failed),
+            ``router_name``, ``domains``, timestamps, and ``result``
+            (when completed) or ``error`` (when failed).
+        """
+        return self._request("GET", f"/v1/route/train/{job_id}")
+
+    def wait_for_training(
+        self,
+        job_id: str,
+        *,
+        poll_interval: float = 3.0,
+        timeout: float = 300.0,
+    ) -> Dict[str, Any]:
+        """Wait for a router training job to complete.
+
+        Args:
+            job_id: The job ID returned by :meth:`train_router`.
+            poll_interval: Seconds between status checks.
+            timeout: Maximum seconds to wait before raising TimeoutError.
+
+        Returns:
+            Final job status dict (same as :meth:`get_training_job`).
+
+        Raises:
+            TimeoutError: If the job doesn't complete within ``timeout``.
+            ApiError: If the job fails.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = self.get_training_job(job_id)
+            if job["status"] == "completed":
+                return job
+            if job["status"] == "failed":
+                raise ApiError(
+                    f"Router training failed: {job.get('error', 'unknown error')}",
+                    status_code=400,
+                    response_body=job,
+                )
+            time.sleep(poll_interval)
+        raise TimeoutError(f"Router training job {job_id} did not complete within {timeout}s")
+
+    def list_routers(self) -> Dict[str, Any]:
+        """List all custom routers trained for your organization.
+
+        Returns:
+            Dict with ``routers`` (list of trained routers with metadata)
+            and ``recent_jobs`` (recent training job summaries).
+        """
+        return self._request("GET", "/v1/route/routers")
+
+    def delete_router(self, router_name: str) -> Dict[str, Any]:
+        """Delete a named custom router.
+
+        The ``"default"`` router cannot be deleted (re-train it instead).
+
+        Args:
+            router_name: Name of the router to delete.
+
+        Returns:
+            Confirmation dict.
+        """
+        return self._request("DELETE", f"/v1/route/routers/{self._path_segment(router_name)}")
+
+    def get_router_performance(self, *, domain: Optional[str] = None) -> Dict[str, Any]:
+        """Get the router's quality and cost metrics by domain.
+
+        Shows how the router compares to the best single model on each
+        domain — quality retention percentage and cost savings.
+
+        Args:
+            domain: Optional domain filter (e.g. ``"law"``). Returns
+                all domains if omitted.
+
+        Returns:
+            Dict with ``overall_quality_vs_reference``, ``overall_cost_savings_pct``,
+            ``domains`` (per-domain breakdown), and ``reference_model``.
+
+        Example::
+
+            perf = client.get_router_performance(domain="coding")
+            print(f"Quality: {perf['overall_quality_vs_reference']}%")
+            print(f"Cost savings: {perf['overall_cost_savings_pct']}%")
+        """
+        params = {"domain": domain} if domain else None
+        return self._request("GET", "/v1/route/performance", params=params)
 
     # ── custom tasks ──────────────────────────────────────────────────
 
