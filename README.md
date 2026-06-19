@@ -215,6 +215,26 @@ Your model credentials are used only during the evaluation and are never stored.
 | `get_rl_curriculum(...)` | Get adaptive curriculum batch biased toward learning frontier |
 | `export_rl_sessions(format, ...)` | Export RL sessions as GRPO/DPO/KTO/process supervision data |
 | `close_rl_session(session_id)` | Manually close an active session |
+| `list_rl_environments(...)` | List available environments (tasks) for RL training |
+| `list_rl_sessions(...)` | List your RL sessions with status filters |
+| `get_rl_stats(...)` | Get completion rates, reward distribution, difficulty profile |
+
+### Capability Matrix
+
+Cross-run model comparison — aggregate scores, gaps, and training artifacts across all your evaluations.
+
+| Method | Description | Tier |
+|--------|-------------|:----:|
+| `get_matrix_models(...)` | List all evaluated models with aggregated stats | All |
+| `get_matrix_model_gaps(model_id, ...)` | Capability gaps for a specific model | All |
+| `get_matrix_model_capabilities(model_id, ...)` | Per-capability breakdown for a model | All |
+| `get_matrix_gaps(...)` | Cross-model capability gaps | All |
+| `get_matrix_domains(...)` | Per-domain score breakdown | All |
+| `get_matrix_artifacts(...)` | Training artifacts from the matrix | All |
+| `get_matrix_model_profile(model_id)` | Detailed model profile — coverage, strengths, weaknesses | Enterprise |
+| `get_matrix_scores(...)` | Raw score data with pagination | Enterprise |
+| `get_matrix_insights(...)` | High-level patterns, rankings, and recommendations | Enterprise |
+| `get_matrix_coverage(...)` | Evaluation coverage — tasks per model per domain | Enterprise |
 
 ## RL Training Loop
 

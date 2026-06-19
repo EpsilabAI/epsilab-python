@@ -1755,6 +1755,358 @@ class EpsilabClient:
             json_body=body,
         )
 
+    def list_rl_environments(
+        self,
+        *,
+        domain: Optional[str] = None,
+        capability: Optional[str] = None,
+        difficulty: Optional[str] = None,
+        verification: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """List available RL environments (tasks suitable for RL training).
+
+        Args:
+            domain: Filter by domain (e.g. ``coding``, ``math``).
+            capability: Filter by capability.
+            difficulty: Filter by difficulty level.
+            verification: Filter by verification type
+                (``hidden_tests``, ``simulation``, ``rubric``).
+            limit: Max results (1-200, default 50).
+            offset: Pagination offset.
+
+        Returns:
+            Dict with ``environments`` list and ``total`` count.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if domain:
+            params["domain"] = domain
+        if capability:
+            params["capability"] = capability
+        if difficulty:
+            params["difficulty"] = difficulty
+        if verification:
+            params["verification"] = verification
+        return self._request("GET", "/v1/rl/environments", params=params)
+
+    def list_rl_sessions(
+        self,
+        *,
+        status: Optional[str] = None,
+        task_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """List your RL sessions.
+
+        Args:
+            status: Filter by status (``active``, ``completed``, ``failed``,
+                ``closed``, ``truncated``).
+            task_id: Filter by task ID.
+            limit: Max results (1-200, default 50).
+            offset: Pagination offset.
+
+        Returns:
+            Dict with ``sessions`` list and ``total`` count.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if status:
+            params["status"] = status
+        if task_id:
+            params["task_id"] = task_id
+        return self._request("GET", "/v1/rl/sessions", params=params)
+
+    def get_rl_stats(
+        self,
+        *,
+        env_type: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get RL environment statistics — completion rates, reward distribution.
+
+        Args:
+            env_type: Filter by environment type.
+            domain: Filter by domain.
+
+        Returns:
+            Dict with ``session_counts``, ``reward_distribution``,
+            ``difficulty_profile``, and ``task_count``.
+        """
+        params: Dict[str, Any] = {}
+        if env_type:
+            params["env_type"] = env_type
+        if domain:
+            params["domain"] = domain
+        return self._request("GET", "/v1/rl/stats", params=params)
+
+    # ── capability matrix ─────────────────────────────────────────────
+
+    def get_matrix_models(
+        self,
+        *,
+        modality: Optional[str] = None,
+        min_tasks: int = 5,
+    ) -> Dict[str, Any]:
+        """List all models you've evaluated, with aggregated stats.
+
+        Args:
+            modality: Filter by modality (``text``, ``voice``).
+            min_tasks: Minimum tasks evaluated to include a model (default 5).
+
+        Returns:
+            Dict with model stats across all evaluations.
+        """
+        params: Dict[str, Any] = {"min_tasks": min_tasks}
+        if modality:
+            params["modality"] = modality
+        return self._request("GET", "/v1/matrix/models", params=params)
+
+    def get_matrix_model_profile(self, model_id: str) -> Dict[str, Any]:
+        """Get a detailed profile for a specific model (enterprise only).
+
+        Includes coverage breakdown, strengths, weaknesses, and domain scores.
+
+        Args:
+            model_id: The model identifier (e.g. ``openai/gpt-4o``).
+
+        Returns:
+            Dict with coverage, domain_scores, strengths, weaknesses.
+        """
+        return self._request(
+            "GET", f"/v1/matrix/models/{self._path_segment(model_id)}/profile"
+        )
+
+    def get_matrix_model_gaps(
+        self,
+        model_id: str,
+        *,
+        domain: Optional[str] = None,
+        min_gap: float = 0.05,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Get capability gaps for a specific model.
+
+        Shows tasks/capabilities where this model underperforms relative
+        to other models you've evaluated.
+
+        Args:
+            model_id: The model to analyze.
+            domain: Filter by domain.
+            min_gap: Minimum gap score to include (0.0-1.0, default 0.05).
+            limit: Max results (1-200, default 50).
+
+        Returns:
+            Dict with ``gaps`` list showing where the model underperforms.
+        """
+        params: Dict[str, Any] = {"min_gap": min_gap, "limit": limit}
+        if domain:
+            params["domain"] = domain
+        return self._request(
+            "GET", f"/v1/matrix/models/{self._path_segment(model_id)}/gaps", params=params
+        )
+
+    def get_matrix_model_capabilities(
+        self,
+        model_id: str,
+        *,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get per-capability breakdown for a model.
+
+        Args:
+            model_id: The model to analyze.
+            domain: Filter by domain.
+
+        Returns:
+            Dict with per-capability scores and gap analysis.
+        """
+        params: Dict[str, Any] = {}
+        if domain:
+            params["domain"] = domain
+        return self._request(
+            "GET",
+            f"/v1/matrix/models/{self._path_segment(model_id)}/capabilities",
+            params=params,
+        )
+
+    def get_matrix_gaps(
+        self,
+        *,
+        model_id: Optional[str] = None,
+        domain: Optional[str] = None,
+        capability: Optional[str] = None,
+        min_alpha: Optional[float] = None,
+        priority: Optional[str] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Get cross-model capability gaps.
+
+        Args:
+            model_id: Show gaps where this model underperforms.
+            domain: Filter by domain.
+            capability: Filter by capability.
+            min_alpha: Minimum gap significance threshold.
+            priority: Filter by priority level.
+            limit: Max results (1-500, default 100).
+
+        Returns:
+            Dict with ``gaps`` list and aggregation metadata.
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if model_id:
+            params["model_id"] = model_id
+        if domain:
+            params["domain"] = domain
+        if capability:
+            params["capability"] = capability
+        if min_alpha is not None:
+            params["min_alpha"] = min_alpha
+        if priority:
+            params["priority"] = priority
+        return self._request("GET", "/v1/matrix/gaps", params=params)
+
+    def get_matrix_domains(
+        self,
+        *,
+        model_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get per-domain score breakdown across all evaluations.
+
+        Args:
+            model_id: Filter to a specific model's domain scores.
+
+        Returns:
+            Dict with per-domain performance aggregates.
+        """
+        params: Dict[str, Any] = {}
+        if model_id:
+            params["model_id"] = model_id
+        return self._request("GET", "/v1/matrix/domains", params=params)
+
+    def get_matrix_scores(
+        self,
+        *,
+        model_id: Optional[str] = None,
+        domain: Optional[str] = None,
+        capability: Optional[str] = None,
+        modality: Optional[str] = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Get raw scores from the capability matrix (enterprise only).
+
+        Args:
+            model_id: Filter by model.
+            domain: Filter by domain.
+            capability: Filter by capability.
+            modality: Filter by modality (``text``, ``voice``).
+            limit: Max results (1-2000, default 500).
+            offset: Pagination offset.
+
+        Returns:
+            Dict with ``scores`` list of per-task model scores.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if model_id:
+            params["model_id"] = model_id
+        if domain:
+            params["domain"] = domain
+        if capability:
+            params["capability"] = capability
+        if modality:
+            params["modality"] = modality
+        return self._request("GET", "/v1/matrix/scores", params=params)
+
+    def get_matrix_artifacts(
+        self,
+        *,
+        model_id: Optional[str] = None,
+        domain: Optional[str] = None,
+        artifact_type: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Get training artifacts from the capability matrix.
+
+        Args:
+            model_id: Filter to artifacts involving this model.
+            domain: Filter by domain.
+            artifact_type: Filter by type (``sft``, ``dpo``, ``kto``, ``grpo``).
+            limit: Max results (1-500, default 100).
+            offset: Pagination offset.
+
+        Returns:
+            Dict with ``artifacts`` list.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if model_id:
+            params["model_id"] = model_id
+        if domain:
+            params["domain"] = domain
+        if artifact_type:
+            params["artifact_type"] = artifact_type
+        return self._request("GET", "/v1/matrix/artifacts", params=params)
+
+    def get_matrix_insights(
+        self,
+        *,
+        modality: Optional[str] = None,
+        min_tasks: int = 5,
+        model_id: Optional[str] = None,
+        refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """Get high-level insights from the capability matrix (enterprise only).
+
+        Identifies overall patterns, model rankings, and recommended
+        training priorities.
+
+        Args:
+            modality: Filter by modality (``text``, ``voice``).
+            min_tasks: Minimum tasks for model inclusion (default 5).
+            model_id: Target model perspective.
+            refresh: Force recomputation of insights cache.
+
+        Returns:
+            Dict with rankings, patterns, and recommendations.
+        """
+        params: Dict[str, Any] = {"min_tasks": min_tasks}
+        if modality:
+            params["modality"] = modality
+        if model_id:
+            params["model_id"] = model_id
+        if refresh:
+            params["refresh"] = "true"
+        return self._request("GET", "/v1/matrix/insights", params=params)
+
+    def get_matrix_coverage(
+        self,
+        *,
+        domain: Optional[str] = None,
+        models: Optional[List[str]] = None,
+        modality: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get evaluation coverage matrix (enterprise only).
+
+        Shows how many tasks each model has been evaluated on per domain.
+
+        Args:
+            domain: Filter by domain.
+            models: Filter to specific model IDs.
+            modality: Filter by modality (``text``, ``voice``).
+
+        Returns:
+            Dict with coverage matrix data.
+        """
+        params: Dict[str, Any] = {}
+        if domain:
+            params["domain"] = domain
+        if models:
+            params["models"] = ",".join(models)
+        if modality:
+            params["modality"] = modality
+        return self._request("GET", "/v1/matrix/coverage", params=params)
+
     # ── exports ──────────────────────────────────────────────────────
 
     def export_run(

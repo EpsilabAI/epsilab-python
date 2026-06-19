@@ -1743,3 +1743,255 @@ class TestCloseRLSession:
             "body": {"reason": "test_complete"},
         }
         assert result["status"] == "failed"
+
+
+class TestListRLEnvironments:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({
+                "environments": [{"env_id": "t1", "env_type": "code_sandbox"}],
+                "total": 1,
+            })
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_rl_environments(domain="coding", limit=10)
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/rl/environments"
+        assert captured["params"]["domain"] == "coding"
+        assert captured["params"]["limit"] == "10"
+        assert result["total"] == 1
+
+
+class TestListRLSessions:
+    def test_with_filters(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({
+                "sessions": [{"session_id": "s1", "status": "completed"}],
+                "total": 1,
+            })
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_rl_sessions(status="completed", task_id="t1")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/rl/sessions"
+        assert captured["params"]["status"] == "completed"
+        assert captured["params"]["task_id"] == "t1"
+        assert result["sessions"][0]["status"] == "completed"
+
+
+class TestGetRLStats:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({
+                "session_counts": {"total": 50, "completed": 40},
+                "reward_distribution": {"mean": 0.72},
+                "task_count": 10,
+            })
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_rl_stats(env_type="code_sandbox")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/rl/stats"
+        assert captured["params"]["env_type"] == "code_sandbox"
+        assert result["session_counts"]["total"] == 50
+
+
+class TestGetMatrixModels:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({
+                "models": [{"model_id": "openai/gpt-4o", "score": 0.85}],
+            })
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_models(modality="text", min_tasks=10)
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/models"
+        assert captured["params"]["modality"] == "text"
+        assert captured["params"]["min_tasks"] == "10"
+        assert result["models"][0]["model_id"] == "openai/gpt-4o"
+
+
+class TestGetMatrixModelProfile:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response({
+                "model_id": "openai/gpt-4o",
+                "coverage": {"total_tasks": 100},
+                "strengths": ["coding", "math"],
+            })
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_model_profile("openai/gpt-4o")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/models/openai/gpt-4o/profile"
+        assert result["strengths"] == ["coding", "math"]
+
+
+class TestGetMatrixGaps:
+    def test_with_filters(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({"gaps": [{"domain": "coding", "gap": 0.15}]})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_gaps(model_id="openai/gpt-4o", domain="coding")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/gaps"
+        assert captured["params"]["model_id"] == "openai/gpt-4o"
+        assert captured["params"]["domain"] == "coding"
+        assert result["gaps"][0]["gap"] == 0.15
+
+
+class TestGetMatrixDomains:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response({"domains": [{"domain": "coding", "avg_score": 0.8}]})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_domains(model_id="openai/gpt-4o")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/domains"
+        assert result["domains"][0]["domain"] == "coding"
+
+
+class TestGetMatrixScores:
+    def test_with_pagination(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({"scores": [], "total": 0})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_scores(domain="math", limit=100, offset=50)
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/scores"
+        assert captured["params"]["domain"] == "math"
+        assert captured["params"]["limit"] == "100"
+        assert captured["params"]["offset"] == "50"
+
+
+class TestGetMatrixArtifacts:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({"artifacts": [{"type": "dpo"}], "total": 1})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_artifacts(artifact_type="dpo", model_id="openai/gpt-4o")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/artifacts"
+        assert captured["params"]["artifact_type"] == "dpo"
+        assert result["artifacts"][0]["type"] == "dpo"
+
+
+class TestGetMatrixInsights:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({"rankings": [], "recommendations": []})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_insights(model_id="openai/gpt-4o", refresh=True)
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/insights"
+        assert captured["params"]["model_id"] == "openai/gpt-4o"
+        assert captured["params"]["refresh"] == "true"
+
+
+class TestGetMatrixCoverage:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({"coverage": {}})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_coverage(
+            domain="coding", models=["openai/gpt-4o", "google/gemini-2.5-flash"]
+        )
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/coverage"
+        assert captured["params"]["domain"] == "coding"
+        assert captured["params"]["models"] == "openai/gpt-4o,google/gemini-2.5-flash"
+
+
+class TestGetMatrixModelGaps:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({"gaps": [{"capability": "reasoning", "gap": 0.2}]})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_model_gaps("openai/gpt-4o", min_gap=0.1, limit=20)
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/models/openai/gpt-4o/gaps"
+        assert captured["params"]["min_gap"] == "0.1"
+        assert captured["params"]["limit"] == "20"
+        assert result["gaps"][0]["gap"] == 0.2
+
+
+class TestGetMatrixModelCapabilities:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response({"capabilities": [{"name": "coding", "score": 0.9}]})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_matrix_model_capabilities("openai/gpt-4o", domain="coding")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/matrix/models/openai/gpt-4o/capabilities"
+        assert result["capabilities"][0]["score"] == 0.9
