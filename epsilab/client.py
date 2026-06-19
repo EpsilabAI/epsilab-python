@@ -28,6 +28,9 @@ from .models import (
     CustomTaskUploadResult,
     EvaluationResult,
     GapSummary,
+    RLSession,
+    RLStepResult,
+    RLTrajectory,
     RunSummary,
     UsageRecord,
 )
@@ -108,7 +111,7 @@ class EpsilabClient:
     # ── lifecycle ────────────────────────────────────────────────────
 
     def close(self) -> None:
-            self._client.close()
+        self._client.close()
 
     def __enter__(self) -> "EpsilabClient":
         return self
@@ -230,7 +233,10 @@ class EpsilabClient:
         json_body: Optional[Dict[str, Any]] = None,
     ) -> Any:
         resp = self._buffered_request_with_retry(
-            method, path, params=params, json_body=json_body,
+            method,
+            path,
+            params=params,
+            json_body=json_body,
         )
         self._check_response_errors(resp)
         if resp.status_code == 204:
@@ -727,11 +733,13 @@ class EpsilabClient:
                       f"{t.content['refined_step_count']} steps "
                       f"({ratio:.0%} of original)")
         """
-        return list(self.iter_artifacts(
-            run_id,
-            artifact_type="refined_trajectory",
-            page_size=page_size,
-        ))
+        return list(
+            self.iter_artifacts(
+                run_id,
+                artifact_type="refined_trajectory",
+                page_size=page_size,
+            )
+        )
 
     def get_insights(self, run_id: str) -> Dict[str, Any]:
         """Get rich analytics for a completed run.
@@ -1049,7 +1057,9 @@ class EpsilabClient:
                     response_body=job,
                 )
             time.sleep(poll_interval)
-        raise TimeoutError(f"Router training job {job_id} did not complete within {timeout}s")
+        raise TimeoutError(
+            f"Router training job {job_id} did not complete within {timeout}s"
+        )
 
     def list_routers(self) -> Dict[str, Any]:
         """List all custom routers trained for your organization.
@@ -1071,7 +1081,9 @@ class EpsilabClient:
         Returns:
             Confirmation dict.
         """
-        return self._request("DELETE", f"/v1/route/routers/{self._path_segment(router_name)}")
+        return self._request(
+            "DELETE", f"/v1/route/routers/{self._path_segment(router_name)}"
+        )
 
     def get_router_performance(self, *, domain: Optional[str] = None) -> Dict[str, Any]:
         """Get the router's quality and cost metrics by domain.
@@ -1242,6 +1254,219 @@ class EpsilabClient:
     def delete_task(self, task_id: str) -> None:
         """Delete a custom task you own."""
         self._request("DELETE", f"/v1/tasks/{self._path_segment(task_id)}")
+
+    # ── RL environments ─────────────────────────────────────────────
+
+    def create_rl_session(
+        self,
+        task_id: str,
+        *,
+        env_type: str = "single_turn",
+        reward_mode: str = "continuous",
+        seed: Optional[int] = None,
+        max_steps: Optional[int] = None,
+    ) -> "RLSession":
+        """Create an RL environment session and get the initial observation.
+
+        Args:
+            task_id: The task to use for this session.
+            env_type: Environment type — ``single_turn``, ``code_sandbox``,
+                ``agent_workflow``, or ``simulation``. Availability may vary
+                by account.
+            reward_mode: Reward mode — ``binary``, ``continuous``, or
+                ``partial_credit``.
+            seed: Optional seed for reproducible episodes (simulation envs).
+            max_steps: Override default max steps for multi-step envs.
+
+        Returns:
+            An :class:`~epsilab.models.RLSession` with the initial observation.
+        """
+        body: Dict[str, Any] = {
+            "task_id": task_id,
+            "env_type": env_type,
+            "reward_mode": reward_mode,
+        }
+        if seed is not None:
+            body["seed"] = seed
+        if max_steps is not None:
+            body["max_steps"] = max_steps
+        data = self._request("POST", "/v1/rl/sessions", json_body=body)
+        return RLSession.from_dict(data)
+
+    def rl_step(
+        self,
+        session_id: str,
+        action: str,
+    ) -> "RLStepResult":
+        """Take an action in an RL environment session.
+
+        Args:
+            session_id: The session to step.
+            action: The action to take. Format depends on environment type:
+
+                - **single_turn**: Free-text response.
+                - **code_sandbox**: Python code (complete function).
+                - **simulation**: JSON-encoded action dict.
+                - **agent_workflow**: JSON tool call.
+
+        Returns:
+            An :class:`~epsilab.models.RLStepResult` with the observation,
+            reward, and terminal flags.
+        """
+        data = self._request(
+            "POST",
+            f"/v1/rl/sessions/{self._path_segment(session_id)}/step",
+            json_body={"action": action},
+        )
+        return RLStepResult.from_dict(data)
+
+    def get_rl_trajectory(self, session_id: str) -> "RLTrajectory":
+        """Get the full trajectory for a completed RL session.
+
+        Actions are returned as hashes for privacy. Observations and
+        rewards are returned in full.
+
+        Args:
+            session_id: The session to retrieve.
+
+        Returns:
+            An :class:`~epsilab.models.RLTrajectory` with all steps.
+        """
+        data = self._request(
+            "GET", f"/v1/rl/sessions/{self._path_segment(session_id)}/trajectory"
+        )
+        return RLTrajectory.from_dict(data)
+
+    def verify_rl_trajectory(self, session_id: str) -> Dict[str, Any]:
+        """Replay a completed session and verify trajectory integrity.
+
+        Replays stored actions in a fresh environment and checks that the
+        resulting trajectory matches. Only deterministically verifiable
+        environments support this operation.
+
+        Args:
+            session_id: The session to verify.
+
+        Returns:
+            Dict with ``verified`` (bool), ``steps_replayed``, and
+            any ``divergences`` found.
+        """
+        return self._request(
+            "POST", f"/v1/rl/sessions/{self._path_segment(session_id)}/verify"
+        )
+
+    def get_rl_curriculum(
+        self,
+        *,
+        env_type: Optional[str] = None,
+        batch_size: int = 64,
+        domain: Optional[str] = None,
+        seed: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Get an adaptive curriculum batch of tasks for RL training.
+
+        Returns tasks selected from prior performance where training signal
+        is expected to be strongest.
+
+        Args:
+            env_type: Environment type filter (single_turn, code_sandbox,
+                agent_workflow, simulation).
+            batch_size: Number of tasks to return (1-512, default 64).
+            domain: Optional domain filter.
+            seed: Optional seed for reproducible sampling.
+
+        Returns:
+            Dict with ``curriculum`` (frontier/exploration/retention task
+            lists), ``stats_summary``, and ``difficulty_profile``.
+        """
+        params: Dict[str, Any] = {"batch_size": batch_size}
+        if env_type:
+            params["env_type"] = env_type
+        if domain:
+            params["domain"] = domain
+        if seed is not None:
+            params["seed"] = seed
+        return self._request("GET", "/v1/rl/curriculum", params=params)
+
+    def export_rl_sessions(
+        self,
+        format: str = "grpo",
+        *,
+        env_type: Optional[str] = None,
+        domain: Optional[str] = None,
+        task_ids: Optional[List[str]] = None,
+        min_sessions: Optional[int] = None,
+        min_score_gap: Optional[float] = None,
+        pass_threshold: Optional[float] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Export completed RL sessions as training data.
+
+        Args:
+            format: Export format — ``grpo``, ``dpo``, ``kto``, or
+                ``process_supervision``.
+            env_type: Filter by environment type.
+            domain: Filter by task domain.
+            task_ids: Filter by specific task IDs.
+            min_sessions: Minimum sessions per task needed to form
+                groups (relevant for GRPO/DPO).
+            min_score_gap: Minimum score gap between chosen/rejected
+                for DPO pairs.
+            pass_threshold: Score threshold to consider a session
+                as positive/passing.
+            limit: Maximum number of records to return (max 500).
+            offset: Pagination offset.
+
+        Returns:
+            Dict with ``records`` (list of training examples),
+            ``format``, ``total``, and ``diagnostics``.
+        """
+        body: Dict[str, Any] = {"format": format}
+        if env_type:
+            body["env_type"] = env_type
+        if domain:
+            body["domain"] = domain
+        if task_ids:
+            body["task_ids"] = task_ids
+        if min_sessions is not None:
+            body["min_sessions"] = min_sessions
+        if min_score_gap is not None:
+            body["min_score_gap"] = min_score_gap
+        if pass_threshold is not None:
+            body["pass_threshold"] = pass_threshold
+        if limit is not None:
+            body["limit"] = limit
+        if offset is not None:
+            body["offset"] = offset
+        return self._request("POST", "/v1/rl/exports", json_body=body)
+
+    def close_rl_session(
+        self,
+        session_id: str,
+        *,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Manually close an active RL session.
+
+        Useful for abandoning a session early without waiting for TTL
+        reaping.
+
+        Args:
+            session_id: The session to close.
+            reason: Optional close reason (default: ``manual_close``).
+
+        Returns:
+            Dict with ``session_id``, ``status``, and ``reason``.
+        """
+        body: Dict[str, Any] = {}
+        if reason:
+            body["reason"] = reason
+        return self._request(
+            "POST",
+            f"/v1/rl/sessions/{self._path_segment(session_id)}/close",
+            json_body=body,
+        )
 
     # ── exports ──────────────────────────────────────────────────────
 

@@ -193,6 +193,89 @@ Your model credentials are used only during the evaluation and are never stored.
 | `get_credit_ledger(...)` | Get credit transaction history |
 | `get_usage(period)` | Get monthly usage summary |
 
+### RL Environments
+
+| Method | Description |
+|--------|-------------|
+| `create_rl_session(task_id, ...)` | Create an RL environment session and get initial observation |
+| `rl_step(session_id, action)` | Take an action and receive observation, reward, done flags |
+| `get_rl_trajectory(session_id)` | Get full trajectory for a completed session |
+| `verify_rl_trajectory(session_id)` | Replay and verify trajectory integrity |
+| `get_rl_curriculum(...)` | Get adaptive curriculum batch biased toward learning frontier |
+| `export_rl_sessions(format, ...)` | Export RL sessions as GRPO/DPO/KTO/process supervision data |
+| `close_rl_session(session_id)` | Manually close an active session |
+
+## RL Training Loop
+
+Use RL environments to collect training data through interactive sessions:
+
+```python
+from epsilab import Epsilab
+
+client = Epsilab(api_key="sk-...")
+
+# Get adaptive curriculum (tasks at your model's learning frontier)
+curriculum = client.get_rl_curriculum(env_type="code_sandbox", batch_size=16)
+task_ids = curriculum["curriculum"]["frontier_tasks"] + curriculum["curriculum"]["exploration_tasks"]
+
+for task_id in task_ids:
+    # Start a session
+    session = client.create_rl_session(
+        task_id,
+        env_type="code_sandbox",
+        reward_mode="partial_credit",
+    )
+    print(f"Task: {session.observation[:80]}...")
+
+    observation = session.observation
+    completed = False
+    try:
+        for attempt in range(5):
+            action = your_model.generate(observation)
+            result = client.rl_step(session.session_id, action)
+            observation = result.observation
+
+            print(f"  Step {attempt}: reward={result.reward}, done={result.done}")
+            if result.done:
+                completed = True
+                break
+    finally:
+        if not completed:
+            client.close_rl_session(session.session_id, reason="training_interrupted")
+
+# Export collected sessions as GRPO training data
+data = client.export_rl_sessions("grpo", env_type="code_sandbox")
+print(f"Exported {data['n_records']} GRPO records")
+```
+
+### Environment Types
+
+| Type | Description | Multi-step |
+|------|-------------|:----------:|
+| `single_turn` | Question → answer, scored by the task's configured verifier | No |
+| `code_sandbox` | Write code and validate it in an isolated execution environment | Yes |
+| `agent_workflow` | Tool-calling agent in a persistent isolated environment | Yes |
+| `simulation` | Deterministic state transitions with dense rewards | Yes |
+
+### TRL GRPO Integration
+
+```python
+def reward_fn(completions, task_ids, **kwargs):
+    """Use Epsilab environment as live reward function."""
+    rewards = []
+    for completion, task_id in zip(completions, task_ids):
+        session = client.create_rl_session(task_id, env_type="code_sandbox")
+        completed = False
+        try:
+            result = client.rl_step(session.session_id, completion)
+            completed = result.done
+            rewards.append(result.reward or 0.0)
+        finally:
+            if not completed:
+                client.close_rl_session(session.session_id, reason="reward_complete")
+    return rewards
+```
+
 ## Export Formats
 
 | Format | Use Case |

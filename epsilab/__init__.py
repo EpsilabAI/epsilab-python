@@ -17,6 +17,7 @@ from .exceptions import (
     InsufficientCreditsError,
     RateLimitError,
 )
+from .models import RLSession, RLStepResult, RLTrajectory
 
 __all__ = [
     "Epsilab",
@@ -26,6 +27,9 @@ __all__ = [
     "InsufficientCreditsError",
     "RateLimitError",
     "ApiError",
+    "RLSession",
+    "RLStepResult",
+    "RLTrajectory",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

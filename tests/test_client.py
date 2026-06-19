@@ -258,7 +258,8 @@ class TestStreamExport:
 
         client = _make_client(httpx.MockTransport(handler))
         client.stream_export(
-            "r1", "dpo",
+            "r1",
+            "dpo",
             min_score_gap=0.2,
             min_chosen_score=0.5,
         )
@@ -1294,3 +1295,275 @@ class TestCodeHygiene:
                 assert var.startswith("EPSILAB_"), (
                     f"Unexpected env var in {py.name}: {var}"
                 )
+
+
+# ── RL environments ──────────────────────────────────────────────────
+
+
+class TestCreateRLSession:
+    def test_creates_session(self):
+        transport = httpx.MockTransport(
+            lambda req: _json_response(
+                {
+                    "session_id": "sess-001",
+                    "task_id": "fib-task",
+                    "env_type": "code_sandbox",
+                    "status": "active",
+                    "observation": "Implement fibonacci...",
+                    "reward_mode": "partial_credit",
+                    "info": {"max_steps": 5},
+                }
+            )
+        )
+        client = _make_client(transport)
+        session = client.create_rl_session(
+            "fib-task", env_type="code_sandbox", reward_mode="partial_credit"
+        )
+        assert session.session_id == "sess-001"
+        assert session.task_id == "fib-task"
+        assert session.env_type == "code_sandbox"
+        assert session.status == "active"
+        assert "fibonacci" in session.observation.lower()
+        assert session.reward_mode == "partial_credit"
+
+    def test_sends_optional_params(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "session_id": "sess-002",
+                    "task_id": "sim-task",
+                    "env_type": "simulation",
+                    "status": "active",
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        client.create_rl_session(
+            "sim-task", env_type="simulation", seed=42, max_steps=100
+        )
+        assert captured == {
+            "method": "POST",
+            "path": "/v1/rl/sessions",
+            "body": {
+                "task_id": "sim-task",
+                "env_type": "simulation",
+                "reward_mode": "continuous",
+                "seed": 42,
+                "max_steps": 100,
+            },
+        }
+
+
+class TestRLStep:
+    def test_intermediate_step(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "observation": "1/3 tests passed.",
+                    "reward": None,
+                    "terminated": False,
+                    "truncated": False,
+                    "info": {"step": 1, "tests_passed": 1, "tests_total": 3},
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.rl_step("sess-001", "def fib(n): return n")
+        assert captured == {
+            "method": "POST",
+            "path": "/v1/rl/sessions/sess-001/step",
+            "body": {"action": "def fib(n): return n"},
+        }
+        assert result.reward is None
+        assert result.done is False
+        assert result.info["tests_passed"] == 1
+
+    def test_terminal_step(self):
+        transport = httpx.MockTransport(
+            lambda req: _json_response(
+                {
+                    "observation": "3/3 tests passed.",
+                    "reward": 1.0,
+                    "terminated": True,
+                    "truncated": False,
+                    "info": {"all_passed": True},
+                }
+            )
+        )
+        client = _make_client(transport)
+        result = client.rl_step("sess-001", "def fib(n): ...")
+        assert result.reward == 1.0
+        assert result.terminated is True
+        assert result.done is True
+
+
+class TestGetRLTrajectory:
+    def test_retrieves_trajectory(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                {
+                    "session_id": "sess-001",
+                    "task_id": "fib-task",
+                    "env_type": "code_sandbox",
+                    "status": "completed",
+                    "total_reward": 1.0,
+                    "steps_taken": 2,
+                    "steps": [
+                        {
+                            "step_idx": 0,
+                            "action_hash": "abc123",
+                            "reward": None,
+                            "terminated": False,
+                            "truncated": False,
+                        },
+                        {
+                            "step_idx": 1,
+                            "action_hash": "def456",
+                            "reward": 1.0,
+                            "terminated": True,
+                            "truncated": False,
+                        },
+                    ],
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        traj = client.get_rl_trajectory("sess-001")
+        assert captured == {
+            "method": "GET",
+            "path": "/v1/rl/sessions/sess-001/trajectory",
+        }
+        assert traj.session_id == "sess-001"
+        assert traj.total_reward == 1.0
+        assert len(traj.steps) == 2
+        assert traj.steps[1]["reward"] == 1.0
+
+
+class TestVerifyRLTrajectory:
+    def test_verified_trajectory(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                {
+                    "verified": True,
+                    "steps_replayed": 3,
+                    "divergences": [],
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.verify_rl_trajectory("sess-001")
+        assert captured == {
+            "method": "POST",
+            "path": "/v1/rl/sessions/sess-001/verify",
+        }
+        assert result["verified"] is True
+        assert result["divergences"] == []
+
+
+class TestGetRLCurriculum:
+    def test_returns_curriculum_batch(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response(
+                {
+                    "curriculum": {
+                        "frontier_tasks": ["t1", "t2"],
+                        "exploration_tasks": ["t3"],
+                        "retention_tasks": [],
+                        "training_total": 3,
+                    },
+                    "stats_summary": {
+                        "total_tasks_available": 100,
+                        "frontier_count": 10,
+                    },
+                    "difficulty_profile": {},
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_rl_curriculum(env_type="code_sandbox", batch_size=4)
+        assert captured == {
+            "method": "GET",
+            "path": "/v1/rl/curriculum",
+            "params": {"batch_size": "4", "env_type": "code_sandbox"},
+        }
+        assert len(result["curriculum"]["frontier_tasks"]) == 2
+        assert result["stats_summary"]["frontier_count"] == 10
+
+
+class TestExportRLSessions:
+    def test_exports_grpo_format(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "schema_version": "rl-export-v1",
+                    "format": "grpo",
+                    "n_records": 1,
+                    "total_records": 1,
+                    "records": [{"prompt": "...", "completions": []}],
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.export_rl_sessions("grpo", env_type="code_sandbox")
+        assert captured == {
+            "method": "POST",
+            "path": "/v1/rl/exports",
+            "body": {"format": "grpo", "env_type": "code_sandbox"},
+        }
+        assert result["format"] == "grpo"
+        assert len(result["records"]) == 1
+        assert result["schema_version"] == "rl-export-v1"
+
+
+class TestCloseRLSession:
+    def test_closes_session(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "session_id": "sess-001",
+                    "status": "failed",
+                    "total_reward": 0.0,
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.close_rl_session("sess-001", reason="test_complete")
+        assert captured == {
+            "method": "POST",
+            "path": "/v1/rl/sessions/sess-001/close",
+            "body": {"reason": "test_complete"},
+        }
+        assert result["status"] == "failed"

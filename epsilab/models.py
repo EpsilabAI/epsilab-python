@@ -424,3 +424,134 @@ class EvaluationResult:
             total_estimated_credits=data.get("total_estimated_credits", 0),
             runs=[EvaluationRunResult.from_dict(r) for r in data.get("runs", [])],
         )
+
+
+# ── RL environments ──────────────────────────────────────────────────
+
+
+@dataclass
+class RLSession:
+    """An active or completed RL environment session.
+
+    Attributes:
+        session_id: Unique session identifier.
+        task_id: The task this session is running.
+        env_type: Environment type (single_turn, code_sandbox, agent_workflow, simulation).
+        status: Session state — ``active``, ``completed``, ``truncated``, ``failed``.
+        observation: Current/initial observation text.
+        reward_mode: Reward mode (binary, continuous, partial_credit).
+        total_reward: Cumulative reward across all steps.
+        steps_taken: Number of steps completed so far.
+        info: Additional metadata from the environment.
+    """
+
+    session_id: str
+    task_id: str
+    env_type: str
+    status: str
+    observation: str = ""
+    reward_mode: str = "continuous"
+    total_reward: Optional[float] = None
+    steps_taken: int = 0
+    info: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RLSession":
+        return cls(
+            session_id=data["session_id"],
+            task_id=data["task_id"],
+            env_type=data["env_type"],
+            status=data["status"],
+            observation=data.get("observation", ""),
+            reward_mode=data.get("reward_mode", "continuous"),
+            total_reward=data.get("total_reward"),
+            steps_taken=data.get("steps_taken", 0),
+            info=data.get("info", {}),
+        )
+
+
+@dataclass
+class RLStepResult:
+    """Result of taking an action in an RL environment.
+
+    Attributes:
+        observation: Text observation from the environment.
+        reward: Reward for this step (None for intermediate steps).
+        terminated: Whether the episode ended naturally (goal reached).
+        truncated: Whether the episode was cut short (max steps, error).
+        info: Step metadata (scores, latency, terminal_reason, etc.).
+    """
+
+    observation: str
+    reward: Optional[float]
+    terminated: bool
+    truncated: bool
+    info: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
+
+    @property
+    def done(self) -> bool:
+        """True if the episode is over (terminated or truncated)."""
+        return self.terminated or self.truncated
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RLStepResult":
+        return cls(
+            observation=data.get("observation", ""),
+            reward=data.get("reward"),
+            terminated=data.get("terminated", False),
+            truncated=data.get("truncated", False),
+            info=data.get("info", {}),
+        )
+
+
+@dataclass
+class RLTrajectory:
+    """Full trajectory for a completed RL session.
+
+    Attributes:
+        session_id: Session that produced this trajectory.
+        task_id: Task the session ran.
+        env_type: Environment type.
+        status: Final session status.
+        total_reward: Cumulative reward.
+        steps_taken: Total steps.
+        steps: List of step records (action_hash, observation, reward, terminated, truncated).
+    """
+
+    session_id: str
+    task_id: str
+    env_type: str
+    status: str
+    total_reward: Optional[float] = None
+    steps_taken: int = 0
+    steps: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RLTrajectory":
+        return cls(
+            session_id=data["session_id"],
+            task_id=data["task_id"],
+            env_type=data["env_type"],
+            status=data["status"],
+            total_reward=data.get("total_reward"),
+            steps_taken=data.get("steps_taken", 0),
+            steps=data.get("steps", []),
+        )
