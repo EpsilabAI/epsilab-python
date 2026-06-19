@@ -155,6 +155,22 @@ def main() -> None:
     if os.environ.get("EPSILAB_RUN_RL_EXAMPLE") == "1":
         _run_rl_example(client)
 
+    # ── Voice evaluation ──────────────────────────────────────────────
+
+    print("\n── Voice ──")
+    route = client.route_voice(
+        "Transcribe English audio with background noise",
+        task_type="voice_asr",
+        language="en",
+        max_latency_s=3.0,
+    )
+    print(f"Voice routing: strategy={route.get('strategy')}, "
+          f"confidence={route.get('confidence')}")
+    candidates = route.get("candidates", [])
+    for c in candidates[:3]:
+        model = c.get("model_id", c) if isinstance(c, dict) else c
+        print(f"  {model}")
+
     # ── Billing ───────────────────────────────────────────────────────
 
     balance = client.get_credit_balance()

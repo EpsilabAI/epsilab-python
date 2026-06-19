@@ -193,6 +193,17 @@ Your model credentials are used only during the evaluation and are never stored.
 | `get_credit_ledger(...)` | Get credit transaction history |
 | `get_usage(period)` | Get monthly usage summary |
 
+### Voice Evaluations
+
+| Method | Description |
+|--------|-------------|
+| `register_voice_asset(asset_id, uri, ...)` | Register an audio asset for voice tasks |
+| `create_voice_task(task_id, task_type, ...)` | Create a voice evaluation task |
+| `create_voice_run(target_model, ...)` | Submit a voice model for evaluation |
+| `get_voice_slices(run_id)` | Get per-slice quality metrics |
+| `get_voice_timeline(run_id, task_id)` | Get event timeline for replay/debugging |
+| `route_voice(prompt, ...)` | Route a voice workload to the best model |
+
 ### RL Environments
 
 | Method | Description |

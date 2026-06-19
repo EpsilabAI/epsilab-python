@@ -1255,6 +1255,293 @@ class EpsilabClient:
         """Delete a custom task you own."""
         self._request("DELETE", f"/v1/tasks/{self._path_segment(task_id)}")
 
+    # ── voice evaluations ─────────────────────────────────────────────
+
+    def register_voice_asset(
+        self,
+        asset_id: str,
+        uri: str,
+        *,
+        kind: str = "input_audio",
+        format: str = "wav",
+        sample_rate: int = 16000,
+        duration_s: float = 0.0,
+        channels: int = 1,
+        codec: Optional[str] = None,
+        language: Optional[str] = None,
+        locale: Optional[str] = None,
+        synthetic: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Register a voice asset for use in voice evaluation tasks.
+
+        Args:
+            asset_id: Unique identifier for this asset.
+            uri: URI pointing to the audio file (``gs://``, ``s3://``,
+                or ``https://``).
+            kind: Asset role — ``input_audio``, ``reference_audio``, etc.
+            format: Audio format (``wav``, ``mp3``, ``flac``, ``ogg``).
+            sample_rate: Sample rate in Hz.
+            duration_s: Duration in seconds.
+            channels: Number of audio channels.
+            codec: Optional codec name.
+            language: BCP-47 language tag.
+            locale: Locale variant (e.g. ``en-US``).
+            synthetic: Whether this audio is synthetic/TTS-generated.
+            metadata: Additional metadata dict.
+
+        Returns:
+            Dict with the validated ``asset`` record.
+        """
+        body: Dict[str, Any] = {
+            "asset_id": asset_id,
+            "uri": uri,
+            "kind": kind,
+            "format": format,
+            "sample_rate": sample_rate,
+            "duration_s": duration_s,
+            "channels": channels,
+            "synthetic": synthetic,
+        }
+        if codec:
+            body["codec"] = codec
+        if language:
+            body["language"] = language
+        if locale:
+            body["locale"] = locale
+        if metadata:
+            body["metadata"] = metadata
+        return self._request("POST", "/v1/voice/assets/register", json_body=body)
+
+    def create_voice_task(
+        self,
+        task_id: str,
+        task_type: str,
+        prompt: str,
+        capability: str,
+        *,
+        assets: Optional[List[Dict[str, Any]]] = None,
+        ground_truth: Optional[str] = None,
+        domain: str = "voice",
+        verification: str = "wer",
+        difficulty: str = "hard",
+        input_modality: str = "audio",
+        output_modality: str = "text",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a voice evaluation task.
+
+        Args:
+            task_id: Unique task identifier.
+            task_type: Voice task type (e.g. ``voice_asr``, ``voice_tts``,
+                ``voice_emotion``, ``voice_speaker_id``).
+            prompt: Task prompt or instructions.
+            capability: The capability being tested.
+            assets: List of voice asset dicts (each must include
+                ``asset_id`` and ``uri``).
+            ground_truth: Expected output for scoring.
+            domain: Task domain (default ``voice``).
+            verification: Verification method (default ``wer``).
+            difficulty: Task difficulty level.
+            input_modality: Input type (``audio``, ``text``).
+            output_modality: Output type (``text``, ``audio``).
+            metadata: Additional metadata dict.
+
+        Returns:
+            Dict with the created task details.
+        """
+        body: Dict[str, Any] = {
+            "task_id": task_id,
+            "task_type": task_type,
+            "prompt": prompt,
+            "capability": capability,
+            "domain": domain,
+            "verification": verification,
+            "difficulty": difficulty,
+            "input_modality": input_modality,
+            "output_modality": output_modality,
+        }
+        if assets:
+            body["assets"] = assets
+        if ground_truth:
+            body["ground_truth"] = ground_truth
+        if metadata:
+            body["metadata"] = metadata
+        return self._request("POST", "/v1/voice/tasks", json_body=body)
+
+    def create_voice_run(
+        self,
+        target_model: str,
+        *,
+        target_config: Optional[Dict[str, str]] = None,
+        reference_models: Optional[List[str]] = None,
+        task_ids: Optional[List[str]] = None,
+        task_type: Optional[str] = None,
+        name: Optional[str] = None,
+        max_tasks: Optional[int] = None,
+        reference_mode: str = "best_on_task",
+        reference_top_k: int = 3,
+        pre_registered_reference: Optional[str] = None,
+        exploratory: bool = False,
+    ) -> "RunSummary":
+        """Create a voice evaluation run.
+
+        Evaluates a voice model against reference models on voice tasks.
+        Results include per-slice metrics, event timelines, and gap
+        detection for voice capabilities.
+
+        Args:
+            target_model: The voice model to evaluate.
+            target_config: Optional custom endpoint (``base_url`` and
+                ``api_key``) for BYOM voice models.
+            reference_models: Models to compare against.
+            task_ids: Specific task IDs to evaluate on. If omitted,
+                tasks are selected automatically.
+            task_type: Filter tasks by voice task type.
+            name: Display name for the run.
+            max_tasks: Maximum number of tasks to evaluate.
+            reference_mode: Comparator strategy — ``best_on_task``,
+                ``best_model``, ``top_k_mean``, ``panel_mean``, or
+                ``pre_registered``.
+            reference_top_k: Number of top references for ``top_k_mean``.
+            pre_registered_reference: Required when reference_mode is
+                ``pre_registered``.
+            exploratory: If true, includes broader task sampling.
+
+        Returns:
+            A :class:`~epsilab.models.RunSummary` for the queued run.
+        """
+        body: Dict[str, Any] = {
+            "target_model": target_model,
+            "reference_mode": reference_mode,
+            "reference_top_k": reference_top_k,
+            "exploratory": exploratory,
+        }
+        if target_config:
+            body["target_config"] = target_config
+        if reference_models:
+            body["reference_models"] = reference_models
+        if task_ids:
+            body["task_ids"] = task_ids
+        if task_type:
+            body["task_type"] = task_type
+        if name:
+            body["name"] = name
+        if max_tasks is not None:
+            body["max_tasks"] = max_tasks
+        if pre_registered_reference:
+            body["pre_registered_reference"] = pre_registered_reference
+        data = self._request("POST", "/v1/voice/runs", json_body=body)
+        return RunSummary.from_dict(data)
+
+    def get_voice_slices(self, run_id: str) -> Dict[str, Any]:
+        """Get per-slice voice metrics for a completed voice run.
+
+        Returns quality scores broken down by audio characteristics
+        (speaker, noise level, accent, etc.).
+
+        Args:
+            run_id: The voice run to query.
+
+        Returns:
+            Dict with ``slices`` (list of metric dicts) and
+            ``total_results``.
+        """
+        return self._request(
+            "GET", f"/v1/voice/runs/{self._path_segment(run_id)}/slices"
+        )
+
+    def get_voice_timeline(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        model_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the event timeline for a voice task result.
+
+        Returns the sequence of processing events (audio chunks,
+        transcription segments, latency markers) for replay and
+        debugging.
+
+        Args:
+            run_id: The voice run.
+            task_id: The specific task within the run.
+            model_id: Optional model filter if multiple models produced
+                results for the same task.
+
+        Returns:
+            Dict with ``event_timeline``, ``output_assets``,
+            ``scenario_checks``, and ``model_alias``.
+        """
+        params: Optional[Dict[str, Any]] = None
+        if model_id:
+            params = {"model_id": model_id}
+        return self._request(
+            "GET",
+            f"/v1/voice/runs/{self._path_segment(run_id)}/timeline/{self._path_segment(task_id)}",
+            params=params,
+        )
+
+    def route_voice(
+        self,
+        prompt: str,
+        *,
+        task_type: str = "voice_asr",
+        strategy: str = "quality_first",
+        max_candidates: int = 5,
+        input_modality: str = "audio",
+        output_modality: str = "text",
+        language: Optional[str] = None,
+        locale: Optional[str] = None,
+        max_latency_s: Optional[float] = None,
+        max_cost_per_request_usd: Optional[float] = None,
+        router_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Route a voice workload to the best model candidates.
+
+        Uses evaluation history and constraints to recommend models
+        for a given voice task.
+
+        Args:
+            prompt: Task description or scenario to route.
+            task_type: Voice task type (e.g. ``voice_asr``, ``voice_tts``).
+            strategy: Routing strategy — ``quality_first``,
+                ``cost_first``, ``balanced``, ``latency_first``,
+                ``cascade``, or ``selective``.
+            max_candidates: Maximum models to return (1-20).
+            input_modality: Input type (``audio`` or ``text``).
+            output_modality: Output type (``text`` or ``audio``).
+            language: BCP-47 language constraint.
+            locale: Locale constraint.
+            max_latency_s: Maximum acceptable latency in seconds.
+            max_cost_per_request_usd: Maximum cost per request.
+            router_name: Use a specific trained router.
+
+        Returns:
+            Dict with ``primary`` (top pick), ``candidates`` (ranked
+            list), ``strategy``, ``confidence``, and ``explanation``.
+        """
+        body: Dict[str, Any] = {
+            "prompt": prompt,
+            "task_type": task_type,
+            "strategy": strategy,
+            "max_candidates": max_candidates,
+            "input_modality": input_modality,
+            "output_modality": output_modality,
+        }
+        if language:
+            body["language"] = language
+        if locale:
+            body["locale"] = locale
+        if max_latency_s is not None:
+            body["max_latency_s"] = max_latency_s
+        if max_cost_per_request_usd is not None:
+            body["max_cost_per_request_usd"] = max_cost_per_request_usd
+        if router_name:
+            body["router_name"] = router_name
+        return self._request("POST", "/v1/voice/route", json_body=body)
+
     # ── RL environments ─────────────────────────────────────────────
 
     def create_rl_session(

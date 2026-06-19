@@ -1297,6 +1297,182 @@ class TestCodeHygiene:
                 )
 
 
+# ── Voice evaluations ────────────────────────────────────────────────
+
+
+class TestRegisterVoiceAsset:
+    def test_registers_asset(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"asset": {"asset_id": "a1", "uri": "gs://bucket/audio.wav"}},
+                status=201,
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.register_voice_asset(
+            "a1", "gs://bucket/audio.wav", language="en", duration_s=3.5
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/voice/assets/register"
+        assert captured["body"]["asset_id"] == "a1"
+        assert captured["body"]["language"] == "en"
+        assert captured["body"]["duration_s"] == 3.5
+        assert result["asset"]["asset_id"] == "a1"
+
+
+class TestCreateVoiceTask:
+    def test_creates_task(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"task_id": "vt-1", "domain": "voice", "verification": "wer"},
+                status=201,
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_voice_task(
+            "vt-1",
+            "voice_asr",
+            "Transcribe this audio clip.",
+            "speech_recognition",
+            assets=[{"asset_id": "a1", "uri": "gs://bucket/clip.wav"}],
+            ground_truth="Hello world",
+        )
+        assert captured["body"]["task_id"] == "vt-1"
+        assert captured["body"]["task_type"] == "voice_asr"
+        assert captured["body"]["ground_truth"] == "Hello world"
+        assert len(captured["body"]["assets"]) == 1
+        assert result["task_id"] == "vt-1"
+
+
+class TestCreateVoiceRun:
+    def test_creates_run(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"run_id": "vr-1", "status": "queued"},
+                status=202,
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        run = client.create_voice_run(
+            "openai/whisper-large-v3",
+            reference_models=["deepgram/nova-2"],
+            task_ids=["vt-1", "vt-2"],
+            name="ASR eval",
+        )
+        assert captured == {
+            "method": "POST",
+            "path": "/v1/voice/runs",
+            "body": {
+                "target_model": "openai/whisper-large-v3",
+                "reference_models": ["deepgram/nova-2"],
+                "task_ids": ["vt-1", "vt-2"],
+                "name": "ASR eval",
+                "reference_mode": "best_on_task",
+                "reference_top_k": 3,
+                "exploratory": False,
+            },
+        }
+        assert run.run_id == "vr-1"
+        assert run.status == "queued"
+
+
+class TestGetVoiceSlices:
+    def test_returns_slices(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                {
+                    "run_id": "vr-1",
+                    "slices": [{"name": "noisy", "wer": 0.12, "count": 5}],
+                    "total_results": 20,
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_voice_slices("vr-1")
+        assert captured == {"method": "GET", "path": "/v1/voice/runs/vr-1/slices"}
+        assert len(result["slices"]) == 1
+        assert result["total_results"] == 20
+
+
+class TestGetVoiceTimeline:
+    def test_returns_timeline(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                {
+                    "run_id": "vr-1",
+                    "task_id": "vt-1",
+                    "model_alias": "target_model",
+                    "event_timeline": [{"t": 0.0, "type": "chunk"}],
+                    "output_assets": [],
+                    "scenario_checks": {},
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_voice_timeline("vr-1", "vt-1")
+        assert captured == {
+            "method": "GET",
+            "path": "/v1/voice/runs/vr-1/timeline/vt-1",
+        }
+        assert result["model_alias"] == "target_model"
+        assert len(result["event_timeline"]) == 1
+
+
+class TestRouteVoice:
+    def test_routes_workload(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "strategy": "quality_first",
+                    "confidence": 0.85,
+                    "primary": {"model_id": "openai/whisper-large-v3"},
+                    "candidates": [{"model_id": "openai/whisper-large-v3"}],
+                    "explanation": "Best WER on similar tasks",
+                    "router_id": "global",
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.route_voice(
+            "Transcribe a noisy phone call",
+            task_type="voice_asr",
+            language="en",
+            max_latency_s=2.0,
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/voice/route"
+        assert captured["body"]["language"] == "en"
+        assert captured["body"]["max_latency_s"] == 2.0
+        assert result["confidence"] == 0.85
+        assert result["primary"]["model_id"] == "openai/whisper-large-v3"
+
+
 # ── RL environments ──────────────────────────────────────────────────
 
 
