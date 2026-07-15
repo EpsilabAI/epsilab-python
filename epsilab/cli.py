@@ -283,6 +283,8 @@ def cmd_env_create(args: argparse.Namespace) -> None:
 
 def cmd_env_push(args: argparse.Namespace) -> None:
     """Register a new environment release from a manifest file or CLI args."""
+    import re as _re
+
     client = _get_client()
     try:
         if args.manifest:
@@ -301,6 +303,15 @@ def cmd_env_push(args: argparse.Namespace) -> None:
         if not version:
             _err("--version is required (or set release_version in manifest).")
 
+        for cli_arg, label in [
+            (args.runtime_digest, "--runtime-digest"),
+            (args.task_pack_digest, "--task-pack-digest"),
+            (args.verifier_digest, "--verifier-digest"),
+        ]:
+            if cli_arg and not _re.match(r"^sha256:[0-9a-f]{64}$", cli_arg):
+                _err(f"Invalid {label}: must be sha256:<64 hex chars>, got: {cli_arg}")
+
+        env_config = manifest.get("environment", {})
         tp_config = manifest.get("task_pack", {})
         ver_config = manifest.get("verifier", {})
         env_config = manifest.get("environment", {})
@@ -617,6 +628,266 @@ if __name__ == "__main__":
 """
 
 
+def cmd_env_verify(args: argparse.Namespace) -> None:
+    """Run local preflight checks on an environment project before pushing."""
+    import hashlib
+    import re
+    import subprocess
+    import time
+    import urllib.request
+
+    target = Path(args.directory or ".")
+    manifest_path = target / (args.manifest or "epsilab.json")
+    dockerfile = target / "Dockerfile"
+    server_py = target / "server.py"
+    errors: list[str] = []
+    warnings: list[str] = []
+    passed: list[str] = []
+
+    _ok("Verifying environment project...\n")
+
+    # ── 1. Manifest checks ────────────────────────────────────────
+    if not manifest_path.exists():
+        errors.append(f"Manifest not found: {manifest_path}")
+    else:
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            passed.append("Manifest is valid JSON")
+        except json.JSONDecodeError as e:
+            errors.append(f"Manifest is not valid JSON: {e}")
+            manifest = None
+
+        if manifest is not None:
+            for field in ("listing_id", "namespace_id", "release_version"):
+                val = manifest.get(field)
+                if not val or not str(val).strip():
+                    warnings.append(f"Manifest field '{field}' is empty (required for push)")
+                else:
+                    passed.append(f"Manifest field '{field}' is set")
+
+            version = manifest.get("release_version", "")
+            if version and not re.match(r"^\d+\.\d+\.\d+", version):
+                warnings.append(f"release_version '{version}' does not look like semver (X.Y.Z)")
+
+            env_config = manifest.get("environment", {})
+            if not isinstance(env_config, dict):
+                errors.append("Manifest 'environment' section is not an object")
+            else:
+                for digest_field in ("runtime_digest", "action_schema_digest", "observation_schema_digest"):
+                    val = env_config.get(digest_field, "")
+                    if val and not re.match(r"^sha256:[0-9a-f]{64}$", val):
+                        errors.append(f"environment.{digest_field} is not a valid sha256 digest: {val}")
+                    elif val:
+                        passed.append(f"environment.{digest_field} format is valid")
+
+                ref = env_config.get("runtime_ref", "")
+                if ref and not ref.startswith("oci://"):
+                    warnings.append(f"environment.runtime_ref does not start with oci:// — may not be accepted")
+                elif ref:
+                    passed.append("environment.runtime_ref looks like a valid OCI reference")
+
+            tp_config = manifest.get("task_pack", {})
+            if isinstance(tp_config, dict):
+                digest = tp_config.get("artifact_digest", "")
+                if digest and not re.match(r"^sha256:[0-9a-f]{64}$", digest):
+                    errors.append(f"task_pack.artifact_digest is not valid: {digest}")
+
+            ver_config = manifest.get("verifier", {})
+            if isinstance(ver_config, dict):
+                digest = ver_config.get("runtime_digest", "")
+                if digest and not re.match(r"^sha256:[0-9a-f]{64}$", digest):
+                    errors.append(f"verifier.runtime_digest is not valid: {digest}")
+
+    # ── 2. File structure checks ──────────────────────────────────
+    if server_py.exists():
+        passed.append("server.py exists")
+        source = server_py.read_text()
+        if "/reset" not in source:
+            errors.append("server.py does not contain a /reset endpoint")
+        else:
+            passed.append("server.py references /reset endpoint")
+        if "/step" not in source:
+            errors.append("server.py does not contain a /step endpoint")
+        else:
+            passed.append("server.py references /step endpoint")
+        if "8080" not in source and "PORT" not in source:
+            warnings.append("server.py does not reference port 8080 or PORT")
+    else:
+        warnings.append("server.py not found (expected for container environments)")
+
+    if dockerfile.exists():
+        passed.append("Dockerfile exists")
+        df_content = dockerfile.read_text()
+        if "EXPOSE" not in df_content:
+            warnings.append("Dockerfile does not contain EXPOSE directive")
+    else:
+        warnings.append("Dockerfile not found")
+
+    # ── 3. Docker build check (if --build) ────────────────────────
+    image_tag = None
+    if args.build and dockerfile.exists():
+        _ok("Building Docker image...")
+        tag = f"epsilab-verify-{int(time.time())}"
+        result = subprocess.run(
+            ["docker", "build", "-t", tag, "."],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            errors.append(f"Docker build failed:\n{result.stderr[-500:]}")
+        else:
+            passed.append("Docker build succeeded")
+            image_tag = tag
+
+            inspect = subprocess.run(
+                ["docker", "inspect", "--format", "{{.Size}}", tag],
+                capture_output=True, text=True,
+            )
+            if inspect.returncode == 0:
+                size_mb = int(inspect.stdout.strip()) / (1024 * 1024)
+                passed.append(f"Image size: {size_mb:.0f} MB")
+                if size_mb > 4096:
+                    warnings.append(f"Image is {size_mb:.0f} MB — consider optimizing (>4 GB)")
+
+            digest_out = subprocess.run(
+                ["docker", "inspect", "--format", "{{.Id}}", tag],
+                capture_output=True, text=True,
+            )
+            if digest_out.returncode == 0:
+                digest = digest_out.stdout.strip()
+                _ok(f"  Image digest: {digest}")
+
+    # ── 4. Protocol smoke test (if --test or --build) ─────────────
+    if args.test and image_tag:
+        _ok("Running protocol smoke test...")
+        container_id = None
+        try:
+            run_result = subprocess.run(
+                ["docker", "run", "-d", "--rm", "-p", "18080:8080", image_tag],
+                capture_output=True, text=True, timeout=30,
+            )
+            if run_result.returncode != 0:
+                errors.append(f"Failed to start container: {run_result.stderr}")
+            else:
+                container_id = run_result.stdout.strip()
+                time.sleep(3)
+
+                try:
+                    req = urllib.request.Request(
+                        "http://localhost:18080/reset",
+                        data=b"{}",
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        reset_body = json.loads(resp.read())
+                        if "observation" not in reset_body:
+                            errors.append("POST /reset response missing 'observation' field")
+                        else:
+                            passed.append("POST /reset returns valid response with 'observation'")
+                except Exception as e:
+                    errors.append(f"POST /reset failed: {e}")
+
+                try:
+                    req = urllib.request.Request(
+                        "http://localhost:18080/step",
+                        data=json.dumps({"action": "test_action"}).encode(),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        step_body = json.loads(resp.read())
+                        required = {"observation", "reward", "terminated", "truncated"}
+                        missing = required - set(step_body.keys())
+                        if missing:
+                            errors.append(f"POST /step response missing fields: {missing}")
+                        else:
+                            passed.append("POST /step returns all required fields")
+                        if "reward" in step_body:
+                            if not isinstance(step_body["reward"], (int, float)):
+                                errors.append(f"reward must be numeric, got {type(step_body['reward']).__name__}")
+                        if "terminated" in step_body:
+                            if not isinstance(step_body["terminated"], bool):
+                                errors.append(f"terminated must be bool, got {type(step_body['terminated']).__name__}")
+                        if "truncated" in step_body:
+                            if not isinstance(step_body["truncated"], bool):
+                                errors.append(f"truncated must be bool, got {type(step_body['truncated']).__name__}")
+                except Exception as e:
+                    errors.append(f"POST /step failed: {e}")
+
+        finally:
+            if container_id:
+                subprocess.run(
+                    ["docker", "stop", container_id],
+                    capture_output=True, timeout=15,
+                )
+
+    elif args.test and not image_tag:
+        warnings.append("--test requires --build to create a testable image")
+
+    # ── 5. Manifest digest consistency (if --build) ───────────────
+    if image_tag and manifest_path.exists():
+        try:
+            m = json.loads(manifest_path.read_text())
+            env_digest = m.get("environment", {}).get("runtime_digest", "")
+            if env_digest:
+                digest_out = subprocess.run(
+                    ["docker", "inspect", "--format", "{{.Id}}", image_tag],
+                    capture_output=True, text=True,
+                )
+                if digest_out.returncode == 0:
+                    local_digest = digest_out.stdout.strip()
+                    if local_digest == env_digest:
+                        passed.append("Image digest matches manifest runtime_digest")
+                    else:
+                        warnings.append(
+                            f"Local image digest ({local_digest[:20]}...) differs from "
+                            f"manifest runtime_digest ({env_digest[:20]}...) — "
+                            "the manifest digest should match the pushed registry image"
+                        )
+        except Exception:
+            pass
+
+    # ── Report ────────────────────────────────────────────────────
+    print()
+    if passed:
+        for msg in passed:
+            print(f"  \033[32m✓\033[0m {msg}")
+    if warnings:
+        print()
+        for msg in warnings:
+            print(f"  \033[33m⚠\033[0m {msg}")
+    if errors:
+        print()
+        for msg in errors:
+            print(f"  \033[31m✗\033[0m {msg}")
+
+    print()
+    total = len(passed) + len(warnings) + len(errors)
+    if errors:
+        _err(
+            f"Verification failed: {len(errors)} error(s), "
+            f"{len(warnings)} warning(s), {len(passed)} passed "
+            f"out of {total} checks."
+        )
+    elif warnings:
+        _ok(
+            f"Verification passed with warnings: {len(warnings)} warning(s), "
+            f"{len(passed)} passed out of {total} checks."
+        )
+    else:
+        _ok(f"Verification passed: all {total} checks passed.")
+
+    # Cleanup verify image
+    if image_tag:
+        subprocess.run(
+            ["docker", "rmi", image_tag],
+            capture_output=True, timeout=30,
+        )
+
+
 def cmd_env_init(args: argparse.Namespace) -> None:
     slug = args.slug or "my-environment"
     target = Path(args.directory or slug)
@@ -697,6 +968,33 @@ def build_parser() -> argparse.ArgumentParser:
     init_p.add_argument("slug", nargs="?", help="Environment slug (default: my-environment)")
     init_p.add_argument("-d", "--directory", help="Target directory")
     init_p.set_defaults(func=cmd_env_init)
+
+    # env verify
+    verify_p = env_sub.add_parser(
+        "verify",
+        help="Run local preflight checks before pushing",
+        description=(
+            "Validates manifest format, file structure, Docker build, "
+            "and protocol compliance locally before pushing."
+        ),
+    )
+    verify_p.add_argument(
+        "-d", "--directory", default=".",
+        help="Environment project directory (default: current)",
+    )
+    verify_p.add_argument(
+        "--manifest", default="epsilab.json",
+        help="Manifest filename (default: epsilab.json)",
+    )
+    verify_p.add_argument(
+        "--build", action="store_true",
+        help="Build the Docker image and check size/digest",
+    )
+    verify_p.add_argument(
+        "--test", action="store_true",
+        help="Run a protocol smoke test (requires --build)",
+    )
+    verify_p.set_defaults(func=cmd_env_verify)
 
     # env list
     list_p = env_sub.add_parser("list", help="List your environment listings")

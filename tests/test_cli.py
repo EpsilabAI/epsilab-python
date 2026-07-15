@@ -26,6 +26,7 @@ from epsilab.cli import (
     _table,
     build_parser,
     cmd_env_init,
+    cmd_env_verify,
     main,
 )
 from epsilab.exceptions import ApiError
@@ -1102,6 +1103,67 @@ class TestEnvInitDefaultSlug:
         assert manifest["release_version"] == "0.1.0"
 
 
+class TestEnvVerify:
+    def test_verify_scaffolded_project(self, tmp_path, capsys):
+        target = tmp_path / "verify-env"
+        init_args = build_parser().parse_args(["env", "init", "verify-env"])
+        init_args.directory = str(target)
+        cmd_env_init(init_args)
+
+        verify_args = build_parser().parse_args(["env", "verify", "-d", str(target)])
+        cmd_env_verify(verify_args)
+        out = capsys.readouterr().out
+        assert "server.py exists" in out
+        assert "Dockerfile exists" in out
+        assert "Manifest is valid JSON" in out
+        assert "/reset" in out
+        assert "/step" in out
+
+    def test_verify_missing_manifest(self, tmp_path, capsys):
+        target = tmp_path / "empty-env"
+        target.mkdir()
+
+        verify_args = build_parser().parse_args(["env", "verify", "-d", str(target)])
+        with pytest.raises(SystemExit):
+            cmd_env_verify(verify_args)
+        out = capsys.readouterr().out
+        assert "Manifest not found" in out
+
+    def test_verify_invalid_digest(self, tmp_path, capsys):
+        target = tmp_path / "bad-digest"
+        target.mkdir()
+        manifest = {
+            "listing_id": "test",
+            "namespace_id": "ns",
+            "release_version": "1.0.0",
+            "environment": {"runtime_digest": "sha256:tooshort"},
+        }
+        (target / "epsilab.json").write_text(json.dumps(manifest))
+
+        verify_args = build_parser().parse_args(["env", "verify", "-d", str(target)])
+        with pytest.raises(SystemExit):
+            cmd_env_verify(verify_args)
+        out = capsys.readouterr().out
+        assert "not a valid sha256 digest" in out
+
+    def test_verify_valid_digest(self, tmp_path, capsys):
+        target = tmp_path / "good-digest"
+        target.mkdir()
+        digest = "sha256:" + "a" * 64
+        manifest = {
+            "listing_id": "test",
+            "namespace_id": "ns",
+            "release_version": "1.0.0",
+            "environment": {"runtime_digest": digest},
+        }
+        (target / "epsilab.json").write_text(json.dumps(manifest))
+
+        verify_args = build_parser().parse_args(["env", "verify", "-d", str(target)])
+        cmd_env_verify(verify_args)
+        out = capsys.readouterr().out
+        assert "runtime_digest format is valid" in out
+
+
 class TestSubcommandHelpExits:
     @pytest.mark.parametrize("argv", [
         ["env"],
@@ -1125,6 +1187,7 @@ class TestAllCommandsHaveFunc:
         ["env", "list"],
         ["env", "search"],
         ["env", "create", "s", "t", "--namespace-id", "n"],
+        ["env", "verify"],
         ["env", "push"],
         ["env", "deploy", "--release-id", "r"],
         ["env", "grant", "l", "t"],
