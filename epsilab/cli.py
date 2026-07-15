@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import __version__
+from ._prompt import confirm, info, is_interactive, select, select_or_create, status, step, text
 from .client import EpsilabClient
 from .exceptions import ApiError, AuthError, EpsilabError
 
@@ -117,17 +118,27 @@ def _json_out(data: Any) -> None:
 def cmd_login(args: argparse.Namespace) -> None:
     api_key = args.api_key
     if not api_key:
-        _ok(f"Create an API key at {_DASHBOARD_URL} (Settings > API Keys)")
-        api_key = input("Enter your Epsilab API key: ").strip()
+        if is_interactive():
+            step("Log in to Epsilab")
+            info(f"Create an API key at {_DASHBOARD_URL} (Settings > API Keys)")
+            api_key = text("API key", required=True)
+        else:
+            _ok(f"Create an API key at {_DASHBOARD_URL} (Settings > API Keys)")
+            api_key = input("Enter your Epsilab API key: ").strip()
     if not api_key:
         _err("API key cannot be empty.")
 
     profile_name = getattr(args, "profile", None) or _DEFAULT_PROFILE
+    if is_interactive() and not getattr(args, "profile", None):
+        label_or_profile = text("Profile name", default=_DEFAULT_PROFILE)
+        if label_or_profile:
+            profile_name = label_or_profile
 
     client = EpsilabClient(api_key=api_key)
     try:
         client.get_usage()
         client.close()
+        status("API key validated")
     except AuthError:
         client.close()
         _err(
@@ -145,7 +156,7 @@ def cmd_login(args: argparse.Namespace) -> None:
         profiles[profile_name]["label"] = label
     config["active_profile"] = profile_name
     _save_config(config)
-    _ok(f"Authenticated as profile '{profile_name}'.")
+    _ok(f"\nAuthenticated as profile '{profile_name}'.")
     _ok(f"Credentials saved to {_CONFIG_FILE}")
 
 
@@ -254,26 +265,89 @@ def cmd_env_search(args: argparse.Namespace) -> None:
         client.close()
 
 
+def _interactive_namespace(client: EpsilabClient) -> str:
+    """Interactively select or create a namespace."""
+    listings = client.list_environment_listings(limit=100)
+    seen: dict[str, str] = {}
+    for li in listings:
+        ns_id = getattr(li, "namespace_id", None)
+        ns_slug = getattr(li, "namespace_slug", None) or str(ns_id or "")[:12]
+        if ns_id and str(ns_id) not in seen:
+            seen[str(ns_id)] = ns_slug
+
+    if seen:
+        choices = [{"value": nid, "label": f"{slug} ({nid[:8]}...)"} for nid, slug in seen.items()]
+
+        def _create() -> str:
+            slug = text("Namespace slug", required=True)
+            display = text("Display name", default=slug)
+            ns = client.create_namespace(slug=slug, display_name=display)
+            ns_id = ns.get("namespace_id", "?")
+            status(f"Created namespace: {ns_id}")
+            return str(ns_id)
+
+        return select_or_create("Select namespace", choices, create_label="Create new namespace", create_fn=_create)
+    else:
+        _ok("No namespaces found. Let's create one.")
+        slug = text("Namespace slug", required=True)
+        display = text("Display name", default=slug)
+        ns = client.create_namespace(slug=slug, display_name=display)
+        ns_id = ns.get("namespace_id", "?")
+        status(f"Created namespace: {ns_id}")
+        return str(ns_id)
+
+
 def cmd_env_create(args: argparse.Namespace) -> None:
     client = _get_client()
     try:
-        if not args.namespace_id:
+        namespace_id = args.namespace_id
+        slug = args.slug
+        title = args.title
+        summary = args.summary
+        visibility = args.visibility
+
+        if is_interactive() and not all([namespace_id, slug, title]):
+            step("Create a new environment listing")
+
+            if not namespace_id:
+                namespace_id = _interactive_namespace(client)
+
+            if not slug:
+                slug = text("Listing slug", required=True,
+                            validator=lambda s: "Must be 3+ chars" if len(s) < 3 else None)
+
+            if not title:
+                title = text("Listing title", required=True)
+
+            if not summary:
+                summary = text("Short description", default="")
+
+            visibility = select("Visibility", [
+                {"value": "private", "label": "Private — only you and grantees"},
+                {"value": "unlisted", "label": "Unlisted — accessible via direct link"},
+                {"value": "public", "label": "Public — visible in marketplace"},
+            ], default=visibility or "private")
+
+        if not namespace_id:
             _err(
                 "--namespace-id is required. Create one with:\n"
                 "  epsilab namespace create <slug>\n"
                 f"Or manage namespaces at {_DASHBOARD_URL} (My Environments)"
             )
+
         listing = client.create_listing(
-            namespace_id=args.namespace_id,
-            slug=args.slug,
-            title=args.title,
-            summary=args.summary,
-            visibility=args.visibility,
+            namespace_id=namespace_id,
+            slug=slug,
+            title=title,
+            summary=summary,
+            visibility=visibility,
         )
-        _ok(f"Created listing: {listing.listing_id}")
+        _ok(f"\nCreated listing: {listing.listing_id}")
         _ok(f"  slug: {listing.slug}")
         _ok(f"  title: {listing.title}")
         _ok(f"  visibility: {listing.visibility}")
+        _ok(f"\nNext steps:")
+        _ok(f"  epsilab env push --manifest epsilab.json --listing-id {listing.listing_id}")
         _ok(f"\nManage this listing at {_DASHBOARD_URL} (My Environments)")
     except EpsilabError as e:
         _err(str(e))
@@ -289,25 +363,62 @@ def _deterministic_idem_key(prefix: str, **fields: object) -> str:
     return f"{prefix}-{h}"
 
 
+def _find_manifest(args: argparse.Namespace) -> tuple[dict, Path | None]:
+    """Locate and load the manifest, with interactive fallback."""
+    if args.manifest:
+        manifest_path = Path(args.manifest)
+        if not manifest_path.exists():
+            _err(f"Manifest not found: {manifest_path}")
+        return json.loads(manifest_path.read_text()), manifest_path
+
+    default_path = Path("epsilab.json")
+    if default_path.exists():
+        if is_interactive():
+            if confirm(f"Found {default_path} — use it?"):
+                return json.loads(default_path.read_text()), default_path
+        else:
+            return json.loads(default_path.read_text()), default_path
+
+    if is_interactive():
+        path_str = text("Path to manifest file", default="epsilab.json")
+        p = Path(path_str)
+        if p.exists():
+            return json.loads(p.read_text()), p
+        _err(f"Manifest not found: {p}")
+
+    return {}, None
+
+
+def _interactive_listing(client: EpsilabClient) -> str:
+    """Interactively select from existing listings."""
+    listings = client.list_environment_listings(limit=100)
+    if not listings:
+        _err("No listings found. Create one first:\n  epsilab env create")
+    choices = [
+        {"value": li.listing_id, "label": f"{li.slug} — {li.title} ({li.visibility})"}
+        for li in listings
+    ]
+    return select("Select listing", choices)
+
+
 def cmd_env_push(args: argparse.Namespace) -> None:
     """Register a new environment release from a manifest file or CLI args."""
     import re as _re
 
     client = _get_client()
     try:
-        if args.manifest:
-            manifest_path = Path(args.manifest)
-            if not manifest_path.exists():
-                _err(f"Manifest not found: {manifest_path}")
-            manifest = json.loads(manifest_path.read_text())
-        else:
-            manifest = {}
+        manifest, manifest_path = _find_manifest(args)
 
         listing_id = args.listing_id or manifest.get("listing_id")
+        if not listing_id and is_interactive():
+            listing_id = _interactive_listing(client)
         if not listing_id:
             _err("--listing-id is required (or set listing_id in manifest).")
 
         version = args.version or manifest.get("release_version")
+        if not version and is_interactive():
+            version = text("Release version", default="0.1.0", required=True,
+                           validator=lambda v: None if _re.match(r"^\d+\.\d+\.\d+", v) else "Must be semver (e.g. 0.1.0)")
         if not version:
             _err("--version is required (or set release_version in manifest).")
 
@@ -424,25 +535,41 @@ def cmd_env_push(args: argparse.Namespace) -> None:
 def cmd_env_deploy(args: argparse.Namespace) -> None:
     client = _get_client()
     try:
+        release_id = args.release_id
+        listing_id = args.listing_id
+        alias = args.alias
+
+        if is_interactive() and not args.revision and not all([release_id, listing_id]):
+            step("Deploy an environment release")
+
+            if not listing_id:
+                listing_id = _interactive_listing(client)
+
+            if not release_id:
+                release_id = text("Release ID to deploy", required=True)
+
+            if not alias:
+                alias = text("Deployment alias", default="production")
+
         if args.revision:
             dep = client.create_deployment_revision(
                 args.deployment_id,
-                environment_release_id=args.release_id,
+                environment_release_id=release_id,
                 export_policy=args.export_policy,
             )
             _ok(f"Deployment revised: {dep.get('deployment_id', '?')}")
         else:
-            if not args.listing_id:
+            if not listing_id:
                 _err("--listing-id is required for new deployments.")
             dep = client.create_deployment(
-                listing_id=args.listing_id,
-                alias=args.alias or "production",
-                environment_release_id=args.release_id,
+                listing_id=listing_id,
+                alias=alias or "production",
+                environment_release_id=release_id,
                 export_policy=args.export_policy,
             )
-            _ok(f"Deployed: {dep.get('deployment_id', '?')}")
+            _ok(f"\nDeployed: {dep.get('deployment_id', '?')}")
         _ok(f"  alias: {dep.get('alias', '-')}")
-        _ok(f"  release: {args.release_id}")
+        _ok(f"  release: {release_id}")
         _ok(f"\nManage deployments at {_DASHBOARD_URL} (My Environments)")
         if args.json:
             _json_out(dep)
@@ -530,6 +657,27 @@ def cmd_task_create(args: argparse.Namespace) -> None:
                 _ok(f"Uploaded {len(task_data)} tasks")
                 _ok(f"  created: {result.created}  skipped: {result.skipped}")
                 return
+        elif is_interactive() and not args.task_id:
+            step("Create a new task")
+            task_id = text("Task ID", required=True)
+            prompt_text = text("Task prompt", required=True)
+            domain = text("Domain", default="general")
+            capability = text("Capability", default="general")
+            difficulty = select("Difficulty", [
+                {"value": "easy", "label": "Easy"},
+                {"value": "medium", "label": "Medium"},
+                {"value": "hard", "label": "Hard"},
+            ], default="medium")
+            expected = text("Expected answer (optional)", default="")
+            task_data = {
+                "task_id": task_id,
+                "prompt": prompt_text,
+                "domain": domain,
+                "capability": capability,
+                "difficulty": difficulty,
+            }
+            if expected:
+                task_data["expected_answer"] = expected
         else:
             task_data = {
                 "task_id": args.task_id,
@@ -578,15 +726,50 @@ def cmd_task_list(args: argparse.Namespace) -> None:
 def cmd_namespace_create(args: argparse.Namespace) -> None:
     client = _get_client()
     try:
+        slug = args.slug
+        display_name = args.display_name
+
+        if is_interactive() and not slug:
+            step("Create a new namespace")
+            slug = text("Namespace slug (3-64 chars)", required=True,
+                        validator=lambda s: "Must be 3-64 chars" if len(s) < 3 or len(s) > 64 else None)
+            if not display_name:
+                display_name = text("Display name", default=slug)
+
+        if not slug:
+            _err("slug is required.")
+
         ns = client.create_namespace(
-            slug=args.slug,
-            display_name=args.display_name or args.slug,
+            slug=slug,
+            display_name=display_name or slug,
         )
         ns_id = ns.get("namespace_id", "?")
-        _ok(f"Namespace created: {ns_id}")
-        _ok(f"  slug: {args.slug}")
+        _ok(f"\nNamespace created: {ns_id}")
+        _ok(f"  slug: {slug}")
         _ok(f"\nNext step: create a listing in this namespace:")
         _ok(f"  epsilab env create --namespace-id {ns_id} <slug> \"<title>\"")
+
+        if is_interactive() and confirm("Create a listing in this namespace now?"):
+            listing_slug = text("Listing slug", required=True)
+            listing_title = text("Listing title", required=True)
+            listing_summary = text("Short description", default="")
+            visibility = select("Visibility", [
+                {"value": "private", "label": "Private — only you and grantees"},
+                {"value": "unlisted", "label": "Unlisted — accessible via direct link"},
+                {"value": "public", "label": "Public — visible in marketplace"},
+            ], default="private")
+
+            listing = client.create_listing(
+                namespace_id=str(ns_id),
+                slug=listing_slug,
+                title=listing_title,
+                summary=listing_summary or None,
+                visibility=visibility,
+            )
+            _ok(f"\nCreated listing: {listing.listing_id}")
+            _ok(f"  slug: {listing.slug}")
+            _ok(f"\nReady to push:")
+            _ok(f"  epsilab env push --manifest epsilab.json --listing-id {listing.listing_id}")
     except EpsilabError as e:
         _err(str(e))
     finally:
@@ -624,14 +807,29 @@ def cmd_profile_show(args: argparse.Namespace) -> None:
 def cmd_profile_create(args: argparse.Namespace) -> None:
     client = _get_client()
     try:
+        display_name = args.display_name
+        bio = args.bio
+        website = args.website
+        email = args.email
+
+        if is_interactive() and not display_name:
+            step("Set up your creator profile")
+            display_name = text("Display name", required=True)
+            bio = bio or text("Short bio", default="")
+            website = website or text("Website URL", default="")
+            email = email or text("Contact email", default="")
+
+        if not display_name:
+            _err("display_name is required.")
+
         profile = client.create_creator_profile(
-            display_name=args.display_name,
-            bio=args.bio,
-            website_url=args.website,
-            contact_email=args.email,
+            display_name=display_name,
+            bio=bio,
+            website_url=website,
+            contact_email=email,
         )
-        _ok(f"Creator profile created: {profile.get('display_name', '?')}")
-        _ok(f"\nManage your profile at {_DASHBOARD_URL} (Settings > Profile)")
+        _ok(f"\nCreator profile created: {profile.get('display_name', '?')}")
+        _ok(f"Manage your profile at {_DASHBOARD_URL} (Settings > Profile)")
     except EpsilabError as e:
         _err(str(e))
     finally:
@@ -992,11 +1190,24 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
 
 
 def cmd_env_init(args: argparse.Namespace) -> None:
-    slug = args.slug or "my-environment"
-    target = Path(args.directory or slug)
+    slug = args.slug
+    target_dir = args.directory
+
+    if is_interactive() and not slug:
+        step("Initialize a new environment project")
+        slug = text("Environment slug", default="my-environment", required=True)
+        if not target_dir:
+            target_dir = text("Project directory", default=slug)
+
+    slug = slug or "my-environment"
+    target = Path(target_dir or slug)
 
     if target.exists() and any(target.iterdir()):
-        _err(f"Directory '{target}' already exists and is not empty.")
+        if is_interactive():
+            if not confirm(f"Directory '{target}' is not empty. Continue anyway?", default=False):
+                sys.exit(0)
+        else:
+            _err(f"Directory '{target}' already exists and is not empty.")
 
     target.mkdir(parents=True, exist_ok=True)
 
@@ -1005,13 +1216,13 @@ def cmd_env_init(args: argparse.Namespace) -> None:
     (target / "server.py").write_text(_SERVER_TEMPLATE)
     (target / "requirements.txt").write_text("")
 
-    _ok(f"Initialized environment project in {target}/")
-    _ok(f"")
+    _ok(f"\nInitialized environment project in {target}/")
+    _ok("")
     _ok(f"  {target}/epsilab.json   — release manifest (fill in refs and digests)")
     _ok(f"  {target}/Dockerfile     — container image template")
     _ok(f"  {target}/server.py      — minimal environment server")
-    _ok(f"")
-    _ok(f"Next steps:")
+    _ok("")
+    _ok("Next steps:")
     _ok(f"  1. Implement your environment logic in server.py")
     _ok(f"  2. Build and push your container image")
     _ok(f"  3. Fill in epsilab.json with image refs and content digests")
@@ -1019,7 +1230,7 @@ def cmd_env_init(args: argparse.Namespace) -> None:
     _ok(f"  5. Create a listing:    epsilab env create --namespace-id <ns-id> {slug} \"My Environment\"")
     _ok(f"  6. Push a release:      epsilab env push --manifest epsilab.json --listing-id <listing-id>")
     _ok(f"  7. Deploy:              epsilab env deploy --listing-id <listing-id> --release-id <rel-id>")
-    _ok(f"")
+    _ok("")
     _ok(f"Documentation:  {_DASHBOARD_URL} (Documentation > Quick Start)")
     _ok(f"Dashboard:      {_DASHBOARD_URL} (My Environments)")
 
@@ -1116,9 +1327,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # env create
     create_p = env_sub.add_parser("create", help="Create a new environment listing")
-    create_p.add_argument("slug", help="URL-safe listing slug")
-    create_p.add_argument("title", help="Listing title")
-    create_p.add_argument("--namespace-id", required=True, help="Namespace ID")
+    create_p.add_argument("slug", nargs="?", help="URL-safe listing slug (prompted if omitted)")
+    create_p.add_argument("title", nargs="?", help="Listing title (prompted if omitted)")
+    create_p.add_argument("--namespace-id", help="Namespace ID (prompted if omitted)")
     create_p.add_argument("--summary", help="Short description")
     create_p.add_argument(
         "--visibility",
@@ -1147,7 +1358,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # env deploy
     deploy_p = env_sub.add_parser("deploy", help="Deploy a release")
-    deploy_p.add_argument("--release-id", required=True, help="Release ID to deploy")
+    deploy_p.add_argument("--release-id", help="Release ID to deploy (prompted if omitted)")
     deploy_p.add_argument("--listing-id", help="Listing ID (for new deployments)")
     deploy_p.add_argument("--alias", default="production", help="Deployment alias")
     deploy_p.add_argument("--deployment-id", help="Existing deployment (for revisions)")
@@ -1204,7 +1415,7 @@ def build_parser() -> argparse.ArgumentParser:
     ns_sub = ns_p.add_subparsers(dest="ns_command", help="Namespace commands")
 
     ns_create_p = ns_sub.add_parser("create", help="Create a namespace")
-    ns_create_p.add_argument("slug", help="Namespace slug (3-64 chars)")
+    ns_create_p.add_argument("slug", nargs="?", help="Namespace slug (prompted if omitted)")
     ns_create_p.add_argument("--display-name", help="Human-readable name")
     ns_create_p.set_defaults(func=cmd_namespace_create)
 
@@ -1217,7 +1428,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile_show_p.set_defaults(func=cmd_profile_show)
 
     profile_create_p = profile_sub.add_parser("create", help="Create your creator profile")
-    profile_create_p.add_argument("display_name", help="Public display name")
+    profile_create_p.add_argument("display_name", nargs="?", help="Public display name (prompted if omitted)")
     profile_create_p.add_argument("--bio", help="Short biography")
     profile_create_p.add_argument("--website", help="Website URL")
     profile_create_p.add_argument("--email", help="Contact email")
