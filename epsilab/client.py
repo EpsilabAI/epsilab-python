@@ -164,6 +164,11 @@ class EpsilabClient:
         logger.debug("Retry %d: sleeping %.1fs", attempt + 1, delay)
         time.sleep(delay)
 
+    @staticmethod
+    def _auto_idem_key() -> str:
+        import uuid
+        return uuid.uuid4().hex
+
     def _buffered_request_with_retry(
         self,
         method: str,
@@ -171,6 +176,7 @@ class EpsilabClient:
         *,
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Dict[str, Any]] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> httpx.Response:
         """Execute a buffered HTTP request with automatic retry.
 
@@ -190,6 +196,7 @@ class EpsilabClient:
                     path,
                     params=cleaned_params,
                     json=json_body,
+                    headers=extra_headers,
                 )
             except httpx.TransportError as exc:
                 last_error = exc
@@ -235,12 +242,14 @@ class EpsilabClient:
         *,
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Dict[str, Any]] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> Any:
         resp = self._buffered_request_with_retry(
             method,
             path,
             params=params,
             json_body=json_body,
+            extra_headers=extra_headers,
         )
         self._check_response_errors(resp)
         if resp.status_code == 204:
@@ -3354,6 +3363,7 @@ class EpsilabClient:
             "POST",
             "/v1/environment-namespaces",
             json_body={"slug": slug, "display_name": display_name},
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
         )
 
     def create_listing(
@@ -3388,7 +3398,10 @@ class EpsilabClient:
             body["summary"] = summary
         if visibility:
             body["visibility"] = visibility
-        data = self._request("POST", "/v1/environment-listings", json_body=body)
+        data = self._request(
+            "POST", "/v1/environment-listings", json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
         return EnvironmentListing.from_dict(data)
 
     def update_listing(
@@ -3472,7 +3485,10 @@ class EpsilabClient:
         }
         if members:
             body["members"] = members
-        return self._request("POST", "/v1/task-pack-releases", json_body=body)
+        return self._request(
+            "POST", "/v1/task-pack-releases", json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
 
     def create_verifier_release(
         self,
@@ -3531,7 +3547,10 @@ class EpsilabClient:
             body["timeout_seconds"] = timeout_seconds
         if nondeterministic is not None:
             body["nondeterministic"] = nondeterministic
-        return self._request("POST", "/v1/verifier-releases", json_body=body)
+        return self._request(
+            "POST", "/v1/verifier-releases", json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
 
     def create_environment_release(
         self,
@@ -3582,7 +3601,10 @@ class EpsilabClient:
         }
         if resource_policy:
             body["resource_policy"] = resource_policy
-        data = self._request("POST", "/v1/environment-releases", json_body=body)
+        data = self._request(
+            "POST", "/v1/environment-releases", json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
         return EnvironmentRelease.from_dict(data)
 
     # ── Creator: deployments ─────────────────────────────────────────
@@ -3629,7 +3651,10 @@ class EpsilabClient:
             body["trace_policy"] = trace_policy
         if export_policy:
             body["export_policy"] = export_policy
-        return self._request("POST", "/v1/environment-deployments", json_body=body)
+        return self._request(
+            "POST", "/v1/environment-deployments", json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
 
     def create_deployment_revision(
         self,

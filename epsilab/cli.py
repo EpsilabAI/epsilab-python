@@ -281,6 +281,14 @@ def cmd_env_create(args: argparse.Namespace) -> None:
         client.close()
 
 
+def _deterministic_idem_key(prefix: str, **fields: object) -> str:
+    """Derive a stable idempotency key from content fields."""
+    import hashlib
+    canonical = json.dumps(fields, sort_keys=True, default=str)
+    h = hashlib.sha256(canonical.encode()).hexdigest()[:32]
+    return f"{prefix}-{h}"
+
+
 def cmd_env_push(args: argparse.Namespace) -> None:
     """Register a new environment release from a manifest file or CLI args."""
     import re as _re
@@ -322,41 +330,80 @@ def cmd_env_push(args: argparse.Namespace) -> None:
 
         _ok(f"Pushing environment release v{version} to {listing_id}...")
 
+        tp_name = tp_config.get("name", f"{listing_id}-tasks")
+        tp_artifact_ref = args.task_pack_ref or tp_config.get("artifact_ref", "")
+        tp_artifact_digest = args.task_pack_digest or tp_config.get("artifact_digest", "")
+        tp_usage_policy = tp_config.get("usage_policy", "open")
+        tp_license_id = args.license or tp_config.get("license_id", "apache-2.0")
+        tp_members = tp_config.get("members")
+
+        tp_idem = _deterministic_idem_key(
+            "tp", namespace_id=namespace_id, name=tp_name,
+            version=version, digest=tp_artifact_digest,
+            members=tp_members,
+        )
         tp = client.create_task_pack_release(
             namespace_id=namespace_id,
-            name=tp_config.get("name", f"{listing_id}-tasks"),
+            name=tp_name,
             release_version=version,
-            artifact_ref=args.task_pack_ref or tp_config.get("artifact_ref", ""),
-            artifact_digest=args.task_pack_digest or tp_config.get("artifact_digest", ""),
-            usage_policy=tp_config.get("usage_policy", "open"),
-            license_id=args.license or tp_config.get("license_id", "apache-2.0"),
-            members=tp_config.get("members"),
+            artifact_ref=tp_artifact_ref,
+            artifact_digest=tp_artifact_digest,
+            usage_policy=tp_usage_policy,
+            license_id=tp_license_id,
+            members=tp_members,
+            idempotency_key=tp_idem,
         )
         _ok(f"  Task pack registered: {tp.get('release_id', tp.get('id', '?'))}")
 
+        ver_name = ver_config.get("name", f"{listing_id}-verifier")
+        ver_runtime_ref = args.verifier_ref or ver_config.get("runtime_ref", "")
+        ver_runtime_digest = args.verifier_digest or ver_config.get("runtime_digest", "")
+        ver_source_digest = ver_config.get("source_digest", "")
+        ver_evidence_schema_digest = ver_config.get("evidence_schema_digest", "")
+        ver_reward_mode = ver_config.get("reward_mode", "binary")
+
+        ver_idem = _deterministic_idem_key(
+            "ver", namespace_id=namespace_id, name=ver_name,
+            version=version, digest=ver_runtime_digest,
+        )
         ver = client.create_verifier_release(
             namespace_id=namespace_id,
-            name=ver_config.get("name", f"{listing_id}-verifier"),
+            name=ver_name,
             release_version=version,
-            runtime_ref=args.verifier_ref or ver_config.get("runtime_ref", ""),
-            runtime_digest=args.verifier_digest or ver_config.get("runtime_digest", ""),
-            source_digest=ver_config.get("source_digest", ""),
-            evidence_schema_digest=ver_config.get("evidence_schema_digest", ""),
-            reward_mode=ver_config.get("reward_mode", "binary"),
+            runtime_ref=ver_runtime_ref,
+            runtime_digest=ver_runtime_digest,
+            source_digest=ver_source_digest,
+            evidence_schema_digest=ver_evidence_schema_digest,
+            reward_mode=ver_reward_mode,
+            idempotency_key=ver_idem,
         )
         _ok(f"  Verifier registered: {ver.get('release_id', ver.get('id', '?'))}")
 
+        env_runtime_ref = args.runtime_ref or env_config.get("runtime_ref", "")
+        env_runtime_digest = args.runtime_digest or env_config.get("runtime_digest", "")
+        tp_release_id = str(tp.get("release_id", tp.get("id", "")))
+        ver_release_id = str(ver.get("release_id", ver.get("id", "")))
+        env_action_schema = env_config.get("action_schema_digest", "")
+        env_obs_schema = env_config.get("observation_schema_digest", "")
+        env_resource_policy = env_config.get("resource_policy")
+
+        env_idem = _deterministic_idem_key(
+            "env", listing_id=listing_id, version=version,
+            runtime_digest=env_runtime_digest,
+            tp_release_id=tp_release_id, ver_release_id=ver_release_id,
+        )
         release = client.create_environment_release(
             listing_id=listing_id,
             release_version=version,
             protocol_version=env_config.get("protocol_version", args.protocol_version or "0.4.1"),
-            runtime_ref=args.runtime_ref or env_config.get("runtime_ref", ""),
-            runtime_digest=args.runtime_digest or env_config.get("runtime_digest", ""),
-            task_pack_release_id=str(tp.get("release_id", tp.get("id", ""))),
-            verifier_release_id=str(ver.get("release_id", ver.get("id", ""))),
-            action_schema_digest=env_config.get("action_schema_digest", ""),
-            observation_schema_digest=env_config.get("observation_schema_digest", ""),
-            resource_policy=env_config.get("resource_policy"),
+            runtime_ref=env_runtime_ref,
+            runtime_digest=env_runtime_digest,
+            task_pack_release_id=tp_release_id,
+            verifier_release_id=ver_release_id,
+            action_schema_digest=env_action_schema,
+            observation_schema_digest=env_obs_schema,
+            resource_policy=env_resource_policy,
+            idempotency_key=env_idem,
         )
         _ok(f"  Environment release registered: {release.release_id}")
         _ok(f"\nPushed v{version} successfully.")
