@@ -1,12 +1,16 @@
-"""Epsilab CLI for managing environments and the marketplace.
+"""Epsilab CLI for managing environments, evaluations, and the marketplace.
 
 Usage::
 
     epsilab login
     epsilab whoami
-    epsilab env list
-    epsilab env push ...
-    epsilab env deploy ...
+    epsilab env list / search / create / push / deploy / session / batch / export
+    epsilab run create / list / status / export / cancel
+    epsilab rl envs / session / step / export / stats
+    epsilab route <prompt>
+    epsilab task create / list
+    epsilab namespace create
+    epsilab profile show / create
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -1235,6 +1240,846 @@ def cmd_env_init(args: argparse.Namespace) -> None:
     _ok(f"Dashboard:      {_DASHBOARD_URL} (My Environments)")
 
 
+# ── env session commands ──────────────────────────────────────────────
+
+
+def cmd_env_session_create(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        deployment_id = args.deployment_id
+        task_id = args.task_id
+
+        if is_interactive() and not deployment_id:
+            step("Create an environment session")
+            deployment_id = text("Deployment ID", required=True)
+            if not task_id:
+                task_id = text("Task ID", required=True)
+
+        if not deployment_id or not task_id:
+            _err("--deployment-id and --task-id are required.")
+
+        session = client.create_environment_session(
+            deployment_id=deployment_id,
+            task_id=task_id,
+            seed=args.seed,
+        )
+        _ok(f"Session created: {session.session_id}")
+        _ok(f"  status: {session.status}")
+        _ok(f"  task: {session.task_id}")
+        if session.observation:
+            _ok(f"  observation: {session.observation[:200]}")
+        if session.session_token:
+            _ok(f"  token: {session.session_token[:20]}...")
+        if args.json:
+            _json_out(session.to_dict())
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_session_step(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        session_id = args.session_id
+        action = args.action
+
+        if is_interactive() and not session_id:
+            step("Take an action in an environment session")
+            session_id = text("Session ID", required=True)
+            if not action:
+                action = text("Action", required=True)
+
+        if not session_id or not action:
+            _err("session_id and action are required.")
+
+        result = client.environment_step(
+            session_id=session_id,
+            action=action,
+            session_token=args.session_token,
+        )
+        _ok(f"Reward: {result.reward}")
+        _ok(f"Terminated: {result.terminated}  Truncated: {result.truncated}")
+        if result.observation:
+            _ok(f"Observation: {result.observation[:300]}")
+        if result.info:
+            _ok(f"Info: {json.dumps(result.info, default=str)[:200]}")
+        if args.json:
+            _json_out({"observation": result.observation, "reward": result.reward,
+                        "terminated": result.terminated, "truncated": result.truncated,
+                        "info": result.info})
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_session_show(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        session = client.get_environment_session(args.session_id)
+        _ok(f"Session: {session.session_id}")
+        _ok(f"  status: {session.status}")
+        _ok(f"  deployment: {session.deployment_id}")
+        _ok(f"  task: {session.task_id}")
+        if session.observation:
+            _ok(f"  observation: {session.observation[:300]}")
+        if args.json:
+            _json_out(session.to_dict())
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_session_cancel(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        result = client.cancel_environment_session(args.session_id)
+        _ok(f"Session cancelled: {args.session_id}")
+        if args.json:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_publish(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        listing_id = args.listing_id
+        if is_interactive() and not listing_id:
+            step("Publish a listing to the marketplace")
+            listing_id = _interactive_listing(client)
+        if not listing_id:
+            _err("listing_id is required.")
+
+        result = client.request_publish(listing_id)
+        _ok(f"Publish request submitted for listing: {listing_id}")
+        _ok(f"  status: {result.get('status', 'pending_review')}")
+        _ok(f"\nThe listing will be reviewed by the moderation team.")
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_review(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        listing_id = args.listing_id
+        if args.list_reviews:
+            reviews = client.list_reviews(listing_id, limit=args.limit)
+            if not reviews:
+                _ok("No reviews yet.")
+                return
+            for r in reviews:
+                stars = "*" * r.get("rating", 0)
+                _ok(f"  {stars}  {r.get('title', 'untitled')}")
+                if r.get("body"):
+                    _ok(f"    {r['body'][:120]}")
+            return
+
+        rating = args.rating
+        title = args.title
+
+        if is_interactive() and not all([rating, title]):
+            step("Leave a review")
+            if not listing_id:
+                listing_id = text("Listing ID", required=True)
+            if not rating:
+                rating = int(select("Rating", [
+                    {"value": "5", "label": "★★★★★ Excellent"},
+                    {"value": "4", "label": "★★★★  Great"},
+                    {"value": "3", "label": "★★★   Good"},
+                    {"value": "2", "label": "★★    Fair"},
+                    {"value": "1", "label": "★     Poor"},
+                ]))
+            if not title:
+                title = text("Review title", required=True)
+
+        if not rating or not title:
+            _err("--rating and --title are required.")
+
+        owner_id = args.owner_tenant_id
+        if not owner_id:
+            _err("--owner-tenant-id is required.")
+
+        result = client.create_review(
+            listing_id=listing_id,
+            listing_owner_tenant_id=owner_id,
+            rating=int(rating),
+            title=title,
+            body=args.body,
+            usage_hours=args.usage_hours,
+        )
+        _ok(f"Review submitted: {result.get('review_id', '?')}")
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_purchase(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        if args.list_purchases:
+            purchases = client.list_purchases(limit=args.limit)
+            if not purchases:
+                _ok("No purchases yet.")
+                return
+            rows = [{"id": p.get("purchase_id", "?"), "listing": p.get("listing_id", "?"),
+                      "status": p.get("status", "?"), "amount": p.get("amount_cents", 0)}
+                    for p in purchases]
+            _table(rows, ["id", "listing", "status", "amount"])
+            return
+
+        listing_id = args.listing_id
+        owner_id = args.owner_tenant_id
+        amount = args.amount_cents
+
+        if is_interactive() and not listing_id:
+            step("Purchase environment access")
+            listing_id = text("Listing ID", required=True)
+            if not owner_id:
+                owner_id = text("Owner tenant ID", required=True)
+            if amount is None:
+                amount = int(text("Amount (cents)", default="0"))
+
+        if not listing_id or not owner_id:
+            _err("listing_id and --owner-tenant-id are required.")
+
+        result = client.create_purchase(
+            listing_id=listing_id,
+            listing_owner_tenant_id=owner_id,
+            amount_cents=amount or 0,
+        )
+        _ok(f"Purchase created: {result.get('purchase_id', '?')}")
+        _ok(f"  status: {result.get('status', '?')}")
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+# ── env batch & export commands ──────────────────────────────────────
+
+
+def cmd_env_batch_create(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        deployment_id = args.deployment_id
+        name = args.name
+
+        if is_interactive() and not deployment_id:
+            step("Create a batch evaluation")
+            deployment_id = text("Deployment ID", required=True)
+            if not name:
+                name = text("Batch name", required=True)
+
+        if not deployment_id or not name:
+            _err("--deployment-id and --name are required.")
+
+        if args.file:
+            pairs = json.loads(Path(args.file).read_text())
+        elif args.tasks:
+            pairs = [{"task_id": t, "seed": args.seed or 42} for t in args.tasks.split(",")]
+        else:
+            _err("--tasks or --file is required (comma-separated task IDs or JSON file).")
+
+        result = client.create_batch(
+            deployment_id=deployment_id,
+            name=name,
+            task_seed_pairs=pairs,
+            max_credits=args.max_credits,
+        )
+        _ok(f"Batch created: {result.get('batch_id', '?')}")
+        _ok(f"  tasks: {len(pairs)}")
+        if args.json:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_batch_list(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        batches = client.list_batches(
+            deployment_id=args.deployment_id,
+            status=args.status,
+            limit=args.limit,
+        )
+        if not batches:
+            _ok("No batches found.")
+            return
+        rows = [{"id": b.get("batch_id", "?"), "name": b.get("name", "?"),
+                  "status": b.get("status", "?"),
+                  "sessions": b.get("total_sessions", "?")}
+                for b in batches]
+        _table(rows, ["id", "name", "status", "sessions"])
+        if args.json:
+            _json_out(batches)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_batch_show(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        batch = client.get_batch(args.batch_id)
+        _ok(f"Batch: {batch.get('batch_id', '?')}")
+        _ok(f"  name: {batch.get('name', '?')}")
+        _ok(f"  status: {batch.get('status', '?')}")
+        _ok(f"  sessions: {batch.get('total_sessions', '?')}")
+
+        if args.sessions:
+            sessions = client.get_batch_sessions(args.batch_id)
+            _ok(f"\nSessions ({len(sessions)}):")
+            for s in sessions[:20]:
+                _ok(f"  {s.get('session_id', '?')}  task={s.get('task_id', '?')}  status={s.get('status', '?')}")
+
+        if args.comparison:
+            comp = client.get_batch_comparison(args.batch_id)
+            _ok(f"\nComparison:")
+            _json_out(comp)
+
+        if args.json:
+            _json_out(batch)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_batch_cancel(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        result = client.cancel_batch(args.batch_id)
+        _ok(f"Batch cancelled: {args.batch_id}")
+        if args.json:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_export_create(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        deployment_id = args.deployment_id
+        fmt = args.format
+
+        if is_interactive() and not deployment_id:
+            step("Export training data from environment sessions")
+            deployment_id = text("Deployment ID", required=True)
+            if not fmt:
+                fmt = select("Export format", [
+                    {"value": "grpo", "label": "GRPO — group relative policy optimization"},
+                    {"value": "dpo", "label": "DPO — direct preference optimization"},
+                    {"value": "sft", "label": "SFT — supervised fine-tuning"},
+                    {"value": "jsonl", "label": "JSONL — raw session data"},
+                ], default="grpo")
+
+        if not deployment_id or not fmt:
+            _err("--deployment-id and --format are required.")
+
+        result = client.create_environment_export(
+            deployment_id=deployment_id,
+            format=fmt,
+            filter_domain=args.domain,
+        )
+        _ok(f"Export job created: {result.get('export_id', '?')}")
+        _ok(f"  format: {fmt}")
+        _ok(f"  status: {result.get('status', 'pending')}")
+        if args.json:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_export_list(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        exports = client.list_environment_exports(
+            deployment_id=args.deployment_id,
+            status=args.status,
+            limit=args.limit,
+        )
+        if not exports:
+            _ok("No exports found.")
+            return
+        rows = [{"id": e.get("export_id", "?"), "format": e.get("format", "?"),
+                  "status": e.get("status", "?")}
+                for e in exports]
+        _table(rows, ["id", "format", "status"])
+        if args.json:
+            _json_out(exports)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_env_export_show(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        export = client.get_environment_export(args.export_id)
+        _ok(f"Export: {export.get('export_id', '?')}")
+        _ok(f"  format: {export.get('format', '?')}")
+        _ok(f"  status: {export.get('status', '?')}")
+        if export.get("download_url"):
+            _ok(f"  download: {export['download_url']}")
+        if args.json:
+            _json_out(export)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+# ── run commands ─────────────────────────────────────────────────────
+
+
+def cmd_run_create(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        model = args.model
+
+        if is_interactive() and not model:
+            step("Create an evaluation run")
+            model = text("Model name (e.g. gpt-4, claude-3-opus)", required=True)
+
+        if not model:
+            _err("model is required.")
+
+        domains = args.domains.split(",") if args.domains else None
+
+        run = client.create_run(
+            model,
+            max_tasks=args.max_tasks,
+            domains=domains,
+            force=args.force,
+        )
+        _ok(f"Run created: {run.run_id}")
+        _ok(f"  model: {run.target_model}")
+        _ok(f"  status: {run.status}")
+        _ok(f"  tasks: {run.task_count}")
+        if run.estimated_credits:
+            _ok(f"  estimated credits: {run.estimated_credits}")
+
+        if args.wait:
+            _ok("\nWaiting for completion...")
+            run = client.wait_for_completion(
+                run.run_id,
+                poll_interval=args.poll_interval or 10,
+                timeout=args.timeout or 3600,
+            )
+            _ok(f"Run {run.status}: {run.run_id}")
+
+        if args.json:
+            _json_out(run.to_dict())
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_run_list(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        runs = client.list_runs(
+            status=args.status,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        if not runs:
+            _ok("No runs found.")
+            return
+        rows = [{"id": r.run_id, "model": r.target_model or "?",
+                  "status": r.status, "tasks": r.task_count,
+                  "progress": f"{(r.progress or 0) * 100:.0f}%"}
+                for r in runs]
+        _table(rows, ["id", "model", "status", "tasks", "progress"])
+        if args.json:
+            _json_out([r.to_dict() for r in runs])
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_run_show(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        run = client.get_run(args.run_id)
+        _ok(f"Run: {run.run_id}")
+        _ok(f"  model: {run.target_model}")
+        _ok(f"  status: {run.status}")
+        _ok(f"  tasks: {run.task_count}")
+        _ok(f"  progress: {(run.progress or 0) * 100:.0f}%")
+        if run.gap_count:
+            _ok(f"  gaps found: {run.gap_count}")
+
+        if args.gaps:
+            gaps = client.get_gaps(args.run_id)
+            if gaps:
+                _ok(f"\nCapability gaps ({len(gaps)}):")
+                for g in gaps[:20]:
+                    _ok(f"  {g.capability}: alpha={g.alpha_score:.3f}  priority={g.priority}")
+
+        if args.json:
+            _json_out(run.to_dict())
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_run_cancel(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        run = client.cancel_run(args.run_id)
+        _ok(f"Run cancelled: {run.run_id}")
+        _ok(f"  status: {run.status}")
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_run_export(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        run_id = args.run_id
+        fmt = args.format
+
+        if is_interactive() and not fmt:
+            fmt = select("Export format", [
+                {"value": "grpo", "label": "GRPO — group relative policy optimization"},
+                {"value": "dpo", "label": "DPO — direct preference optimization"},
+                {"value": "sft", "label": "SFT — supervised fine-tuning"},
+                {"value": "kto", "label": "KTO — Kahneman-Tversky optimization"},
+                {"value": "jsonl", "label": "JSONL — raw results"},
+                {"value": "report", "label": "Report — human-readable summary"},
+            ], default="grpo")
+
+        if not fmt:
+            _err("--format is required.")
+
+        output_path = args.output
+        if args.stream:
+            result = client.stream_export(
+                run_id, fmt, path=output_path,
+                min_score_gap=args.min_score_gap,
+            )
+        else:
+            result = client.export_run(run_id, fmt, path=output_path)
+
+        if output_path:
+            _ok(f"Exported to {output_path}")
+        elif isinstance(result, str):
+            print(result)
+        else:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_run_eval(args: argparse.Namespace) -> None:
+    """Multi-model evaluation."""
+    client = _get_client()
+    try:
+        models = args.models.split(",") if args.models else None
+
+        if is_interactive() and not models:
+            step("Create a multi-model evaluation")
+            models_str = text("Models (comma-separated)", required=True)
+            models = [m.strip() for m in models_str.split(",")]
+
+        if not models:
+            _err("--models is required (comma-separated).")
+
+        domains = args.domains.split(",") if args.domains else None
+
+        if args.estimate:
+            est = client.estimate_evaluation_cost(
+                models=models, domains=domains, max_tasks=args.max_tasks,
+            )
+            _ok(f"Cost estimate:")
+            _ok(f"  tasks: {est.task_count}")
+            _ok(f"  total credits: {est.total_credits}")
+            _ok(f"  balance: {est.balance}")
+            _ok(f"  sufficient: {est.sufficient}")
+            if hasattr(est, "per_model") and est.per_model:
+                for pm in est.per_model:
+                    _ok(f"    {pm.model_id}: {pm.credits} credits")
+            return
+
+        result = client.create_evaluation(
+            models=models,
+            name=args.name,
+            domains=domains,
+            max_tasks=args.max_tasks,
+        )
+        _ok(f"Evaluation created: {result.evaluation_id}")
+        _ok(f"  models: {result.total_models}")
+        _ok(f"  estimated credits: {result.total_estimated_credits}")
+        for run in result.runs:
+            _ok(f"  run {run.run_id}: {run.model_id} ({run.status})")
+
+        if args.wait:
+            _ok("\nWaiting for all runs to complete...")
+            for run in result.runs:
+                summary = client.wait_for_completion(run.run_id, timeout=args.timeout or 7200)
+                _ok(f"  {summary.target_model}: {summary.status}")
+
+        if args.json:
+            _json_out({"evaluation_id": result.evaluation_id,
+                        "runs": [r.to_dict() for r in result.runs]})
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+# ── rl commands ──────────────────────────────────────────────────────
+
+
+def cmd_rl_envs(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        result = client.list_rl_environments(
+            domain=args.domain, capability=args.capability,
+            difficulty=args.difficulty, limit=args.limit,
+        )
+        envs = result.get("environments", result) if isinstance(result, dict) else result
+        if not envs:
+            _ok("No RL environments found.")
+            return
+        for e in envs:
+            _ok(f"  {e.get('task_id', '?')}  [{e.get('domain', '')}/{e.get('difficulty', '')}]"
+                f"  {(e.get('prompt', '') or '')[:60]}")
+        _ok(f"\n{len(envs)} environment(s)")
+        if args.json:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_rl_session(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        task_id = args.task_id
+
+        if is_interactive() and not task_id:
+            step("Create an RL training session")
+            task_id = text("Task ID", required=True)
+
+        if not task_id:
+            _err("task_id is required.")
+
+        session = client.create_rl_session(
+            task_id=task_id,
+            env_type=args.env_type,
+            reward_mode=args.reward_mode,
+            seed=args.seed,
+            max_steps=args.max_steps,
+        )
+        _ok(f"RL session created: {session.session_id}")
+        _ok(f"  task: {session.task_id}")
+        _ok(f"  status: {session.status}")
+        if session.observation:
+            _ok(f"  observation: {session.observation[:300]}")
+        if args.json:
+            _json_out(session.to_dict())
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_rl_step(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        result = client.rl_step(args.session_id, args.action)
+        _ok(f"Reward: {result.reward}")
+        _ok(f"Terminated: {result.terminated}  Truncated: {result.truncated}")
+        if result.observation:
+            _ok(f"Observation: {result.observation[:300]}")
+        if args.json:
+            _json_out({"observation": result.observation, "reward": result.reward,
+                        "terminated": result.terminated, "truncated": result.truncated,
+                        "info": result.info})
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_rl_trajectory(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        if args.verify:
+            result = client.verify_rl_trajectory(args.session_id)
+            _ok(f"Verification: {result.get('status', '?')}")
+            if result.get("mismatches"):
+                _ok(f"  mismatches: {result['mismatches']}")
+            if args.json:
+                _json_out(result)
+            return
+
+        traj = client.get_rl_trajectory(args.session_id)
+        _ok(f"Trajectory: {traj.session_id}")
+        _ok(f"  task: {traj.task_id}")
+        _ok(f"  steps: {len(traj.steps)}")
+        _ok(f"  total reward: {traj.total_reward}")
+        if args.json:
+            _json_out(traj.to_dict())
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_rl_sessions(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        result = client.list_rl_sessions(
+            status=args.status, task_id=args.task_id,
+            limit=args.limit,
+        )
+        sessions = result.get("sessions", result) if isinstance(result, dict) else result
+        if not sessions:
+            _ok("No RL sessions found.")
+            return
+        for s in sessions:
+            _ok(f"  {s.get('session_id', '?')}  task={s.get('task_id', '?')}"
+                f"  status={s.get('status', '?')}  reward={s.get('total_reward', '?')}")
+        if args.json:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_rl_export(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        fmt = args.format
+
+        if is_interactive() and not fmt:
+            fmt = select("Export format", [
+                {"value": "grpo", "label": "GRPO — group relative policy optimization"},
+                {"value": "dpo", "label": "DPO — direct preference optimization"},
+                {"value": "sft", "label": "SFT — supervised fine-tuning"},
+            ], default="grpo")
+
+        result = client.export_rl_sessions(
+            format=fmt or "grpo",
+            domain=args.domain,
+            min_score_gap=args.min_score_gap,
+            limit=args.limit,
+        )
+        if args.output:
+            Path(args.output).write_text(json.dumps(result, indent=2, default=str))
+            _ok(f"Exported to {args.output}")
+        else:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_rl_stats(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        stats = client.get_rl_stats(domain=args.domain, env_type=args.env_type)
+        _json_out(stats)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_rl_curriculum(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        result = client.get_rl_curriculum(
+            batch_size=args.batch_size,
+            domain=args.domain,
+            seed=args.seed,
+        )
+        tasks = result.get("tasks", result) if isinstance(result, dict) else result
+        if isinstance(tasks, list):
+            for t in tasks:
+                _ok(f"  {t.get('task_id', '?')}  [{t.get('domain', '')}/{t.get('difficulty', '')}]")
+            _ok(f"\n{len(tasks)} task(s) in curriculum batch")
+        if args.json:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+# ── route command ────────────────────────────────────────────────────
+
+
+def cmd_route(args: argparse.Namespace) -> None:
+    client = _get_client()
+    try:
+        prompt = args.prompt
+
+        if is_interactive() and not prompt:
+            step("Route a prompt to the best model")
+            prompt = text("Prompt", required=True)
+
+        if not prompt:
+            _err("prompt is required.")
+
+        result = client.route(
+            prompt=prompt,
+            strategy=args.strategy,
+            max_candidates=args.max_candidates,
+            router_name=args.router,
+        )
+
+        rec = result.get("recommendation", result)
+        _ok(f"Recommended model: {rec.get('model_id', '?')}")
+        _ok(f"  strategy: {args.strategy}")
+        if rec.get("harness"):
+            _ok(f"  harness: {rec['harness']}")
+        if rec.get("confidence"):
+            _ok(f"  confidence: {rec['confidence']:.2f}")
+
+        candidates = result.get("candidates", [])
+        if candidates:
+            _ok(f"\nCandidates ({len(candidates)}):")
+            for c in candidates:
+                _ok(f"  {c.get('model_id', '?')}: score={c.get('score', '?')}"
+                    f"  cost={c.get('cost_usd', '?')}")
+        if args.json:
+            _json_out(result)
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
 # ── Parser ───────────────────────────────────────────────────────────
 
 
@@ -1390,6 +2235,239 @@ def build_parser() -> argparse.ArgumentParser:
     )
     qualify_p.set_defaults(func=cmd_env_qualify)
 
+    # env publish
+    publish_p = env_sub.add_parser("publish", help="Submit listing for marketplace review")
+    publish_p.add_argument("listing_id", nargs="?", help="Listing ID (prompted if omitted)")
+    publish_p.set_defaults(func=cmd_env_publish)
+
+    # env session
+    session_p = env_sub.add_parser("session", help="Manage hosted environment sessions")
+    session_sub = session_p.add_subparsers(dest="session_command", help="Session commands")
+
+    sess_create_p = session_sub.add_parser("create", help="Create a session")
+    sess_create_p.add_argument("--deployment-id", help="Deployment ID")
+    sess_create_p.add_argument("--task-id", help="Task ID")
+    sess_create_p.add_argument("--seed", type=int, help="Random seed")
+    sess_create_p.add_argument("--json", action="store_true")
+    sess_create_p.set_defaults(func=cmd_env_session_create)
+
+    sess_step_p = session_sub.add_parser("step", help="Take an action")
+    sess_step_p.add_argument("session_id", nargs="?", help="Session ID")
+    sess_step_p.add_argument("action", nargs="?", help="Action string")
+    sess_step_p.add_argument("--session-token", help="Session token")
+    sess_step_p.add_argument("--json", action="store_true")
+    sess_step_p.set_defaults(func=cmd_env_session_step)
+
+    sess_show_p = session_sub.add_parser("show", help="Show session state")
+    sess_show_p.add_argument("session_id", help="Session ID")
+    sess_show_p.add_argument("--json", action="store_true")
+    sess_show_p.set_defaults(func=cmd_env_session_show)
+
+    sess_cancel_p = session_sub.add_parser("cancel", help="Cancel a session")
+    sess_cancel_p.add_argument("session_id", help="Session ID")
+    sess_cancel_p.add_argument("--json", action="store_true")
+    sess_cancel_p.set_defaults(func=cmd_env_session_cancel)
+
+    # env batch
+    batch_p = env_sub.add_parser("batch", help="Manage batch evaluations")
+    batch_sub = batch_p.add_subparsers(dest="batch_command", help="Batch commands")
+
+    batch_create_p = batch_sub.add_parser("create", help="Create a batch evaluation")
+    batch_create_p.add_argument("--deployment-id", help="Deployment ID")
+    batch_create_p.add_argument("--name", help="Batch name")
+    batch_create_p.add_argument("--tasks", help="Comma-separated task IDs")
+    batch_create_p.add_argument("--file", "-f", help="JSON file with task-seed pairs")
+    batch_create_p.add_argument("--seed", type=int, default=42, help="Default seed for tasks")
+    batch_create_p.add_argument("--max-credits", type=int, help="Credit limit")
+    batch_create_p.add_argument("--json", action="store_true")
+    batch_create_p.set_defaults(func=cmd_env_batch_create)
+
+    batch_list_p = batch_sub.add_parser("list", help="List batches")
+    batch_list_p.add_argument("--deployment-id", help="Filter by deployment")
+    batch_list_p.add_argument("--status", help="Filter by status")
+    batch_list_p.add_argument("--limit", type=int, default=50)
+    batch_list_p.add_argument("--json", action="store_true")
+    batch_list_p.set_defaults(func=cmd_env_batch_list)
+
+    batch_show_p = batch_sub.add_parser("show", help="Show batch details")
+    batch_show_p.add_argument("batch_id", help="Batch ID")
+    batch_show_p.add_argument("--sessions", action="store_true", help="Show sessions")
+    batch_show_p.add_argument("--comparison", action="store_true", help="Show comparison report")
+    batch_show_p.add_argument("--json", action="store_true")
+    batch_show_p.set_defaults(func=cmd_env_batch_show)
+
+    batch_cancel_p = batch_sub.add_parser("cancel", help="Cancel a batch")
+    batch_cancel_p.add_argument("batch_id", help="Batch ID")
+    batch_cancel_p.add_argument("--json", action="store_true")
+    batch_cancel_p.set_defaults(func=cmd_env_batch_cancel)
+
+    # env export
+    export_p = env_sub.add_parser("export", help="Export training data from sessions")
+    export_sub = export_p.add_subparsers(dest="export_command", help="Export commands")
+
+    export_create_p = export_sub.add_parser("create", help="Create an export job")
+    export_create_p.add_argument("--deployment-id", help="Deployment ID")
+    export_create_p.add_argument("--format", help="Export format (grpo, dpo, sft, jsonl)")
+    export_create_p.add_argument("--domain", help="Filter by domain")
+    export_create_p.add_argument("--json", action="store_true")
+    export_create_p.set_defaults(func=cmd_env_export_create)
+
+    export_list_p = export_sub.add_parser("list", help="List export jobs")
+    export_list_p.add_argument("--deployment-id", help="Filter by deployment")
+    export_list_p.add_argument("--status", help="Filter by status")
+    export_list_p.add_argument("--limit", type=int, default=50)
+    export_list_p.add_argument("--json", action="store_true")
+    export_list_p.set_defaults(func=cmd_env_export_list)
+
+    export_show_p = export_sub.add_parser("show", help="Show export job status")
+    export_show_p.add_argument("export_id", help="Export ID")
+    export_show_p.add_argument("--json", action="store_true")
+    export_show_p.set_defaults(func=cmd_env_export_show)
+
+    # env review
+    review_p = env_sub.add_parser("review", help="Review an environment listing")
+    review_p.add_argument("listing_id", nargs="?", help="Listing ID")
+    review_p.add_argument("--rating", type=int, choices=[1, 2, 3, 4, 5], help="Star rating")
+    review_p.add_argument("--title", help="Review title")
+    review_p.add_argument("--body", help="Review body")
+    review_p.add_argument("--owner-tenant-id", help="Listing owner's tenant ID")
+    review_p.add_argument("--usage-hours", type=float, help="Hours spent using environment")
+    review_p.add_argument("--list", dest="list_reviews", action="store_true", help="List reviews instead")
+    review_p.add_argument("--limit", type=int, default=20)
+    review_p.set_defaults(func=cmd_env_review)
+
+    # env purchase
+    purchase_p = env_sub.add_parser("purchase", help="Purchase environment access")
+    purchase_p.add_argument("listing_id", nargs="?", help="Listing ID")
+    purchase_p.add_argument("--owner-tenant-id", help="Owner's tenant ID")
+    purchase_p.add_argument("--amount-cents", type=int, help="Amount in cents")
+    purchase_p.add_argument("--list", dest="list_purchases", action="store_true", help="List purchases")
+    purchase_p.add_argument("--limit", type=int, default=50)
+    purchase_p.add_argument("--json", action="store_true")
+    purchase_p.set_defaults(func=cmd_env_purchase)
+
+    # ── run ──────────────────────────────────────────────────────
+    run_p = sub.add_parser("run", help="Manage evaluation runs")
+    run_sub = run_p.add_subparsers(dest="run_command", help="Run commands")
+
+    run_create_p = run_sub.add_parser("create", help="Create a single-model evaluation run")
+    run_create_p.add_argument("model", nargs="?", help="Model name (e.g. gpt-4)")
+    run_create_p.add_argument("--max-tasks", type=int, help="Max tasks to evaluate")
+    run_create_p.add_argument("--domains", help="Comma-separated domains")
+    run_create_p.add_argument("--force", action="store_true", help="Force re-evaluation")
+    run_create_p.add_argument("--wait", action="store_true", help="Wait for completion")
+    run_create_p.add_argument("--poll-interval", type=int, help="Seconds between polls")
+    run_create_p.add_argument("--timeout", type=int, help="Max wait seconds")
+    run_create_p.add_argument("--json", action="store_true")
+    run_create_p.set_defaults(func=cmd_run_create)
+
+    run_list_p = run_sub.add_parser("list", help="List runs")
+    run_list_p.add_argument("--status", help="Filter by status")
+    run_list_p.add_argument("--limit", type=int, default=20)
+    run_list_p.add_argument("--offset", type=int, default=0)
+    run_list_p.add_argument("--json", action="store_true")
+    run_list_p.set_defaults(func=cmd_run_list)
+
+    run_show_p = run_sub.add_parser("show", help="Show run details and gaps")
+    run_show_p.add_argument("run_id", help="Run ID")
+    run_show_p.add_argument("--gaps", action="store_true", help="Show capability gaps")
+    run_show_p.add_argument("--json", action="store_true")
+    run_show_p.set_defaults(func=cmd_run_show)
+
+    run_cancel_p = run_sub.add_parser("cancel", help="Cancel a run")
+    run_cancel_p.add_argument("run_id", help="Run ID")
+    run_cancel_p.set_defaults(func=cmd_run_cancel)
+
+    run_export_p = run_sub.add_parser("export", help="Export training data from a run")
+    run_export_p.add_argument("run_id", help="Run ID")
+    run_export_p.add_argument("--format", help="Export format (grpo, dpo, sft, kto, jsonl, report)")
+    run_export_p.add_argument("--output", "-o", help="Output file path")
+    run_export_p.add_argument("--stream", action="store_true", help="Use streaming export")
+    run_export_p.add_argument("--min-score-gap", type=float, help="Minimum score gap filter")
+    run_export_p.set_defaults(func=cmd_run_export)
+
+    run_eval_p = run_sub.add_parser("eval", help="Multi-model evaluation")
+    run_eval_p.add_argument("--models", help="Comma-separated model names")
+    run_eval_p.add_argument("--name", help="Evaluation name")
+    run_eval_p.add_argument("--domains", help="Comma-separated domains")
+    run_eval_p.add_argument("--max-tasks", type=int, help="Max tasks per model")
+    run_eval_p.add_argument("--estimate", action="store_true", help="Estimate cost only")
+    run_eval_p.add_argument("--wait", action="store_true", help="Wait for completion")
+    run_eval_p.add_argument("--timeout", type=int, help="Max wait seconds")
+    run_eval_p.add_argument("--json", action="store_true")
+    run_eval_p.set_defaults(func=cmd_run_eval)
+
+    # ── rl ───────────────────────────────────────────────────────
+    rl_p = sub.add_parser("rl", help="RL training environments")
+    rl_sub = rl_p.add_subparsers(dest="rl_command", help="RL commands")
+
+    rl_envs_p = rl_sub.add_parser("envs", help="List available RL environments")
+    rl_envs_p.add_argument("--domain", help="Filter by domain")
+    rl_envs_p.add_argument("--capability", help="Filter by capability")
+    rl_envs_p.add_argument("--difficulty", choices=["easy", "medium", "hard"])
+    rl_envs_p.add_argument("--limit", type=int, default=50)
+    rl_envs_p.add_argument("--json", action="store_true")
+    rl_envs_p.set_defaults(func=cmd_rl_envs)
+
+    rl_session_p = rl_sub.add_parser("session", help="Create an RL session")
+    rl_session_p.add_argument("task_id", nargs="?", help="Task ID")
+    rl_session_p.add_argument("--env-type", default="single_turn", help="Environment type")
+    rl_session_p.add_argument("--reward-mode", default="continuous", help="Reward mode")
+    rl_session_p.add_argument("--seed", type=int, help="Random seed")
+    rl_session_p.add_argument("--max-steps", type=int, help="Max steps")
+    rl_session_p.add_argument("--json", action="store_true")
+    rl_session_p.set_defaults(func=cmd_rl_session)
+
+    rl_step_p = rl_sub.add_parser("step", help="Take a step in an RL session")
+    rl_step_p.add_argument("session_id", help="Session ID")
+    rl_step_p.add_argument("action", help="Action string")
+    rl_step_p.add_argument("--json", action="store_true")
+    rl_step_p.set_defaults(func=cmd_rl_step)
+
+    rl_traj_p = rl_sub.add_parser("trajectory", help="Get or verify a trajectory")
+    rl_traj_p.add_argument("session_id", help="Session ID")
+    rl_traj_p.add_argument("--verify", action="store_true", help="Verify trajectory integrity")
+    rl_traj_p.add_argument("--json", action="store_true")
+    rl_traj_p.set_defaults(func=cmd_rl_trajectory)
+
+    rl_sessions_p = rl_sub.add_parser("sessions", help="List RL sessions")
+    rl_sessions_p.add_argument("--status", help="Filter by status")
+    rl_sessions_p.add_argument("--task-id", help="Filter by task")
+    rl_sessions_p.add_argument("--limit", type=int, default=50)
+    rl_sessions_p.add_argument("--json", action="store_true")
+    rl_sessions_p.set_defaults(func=cmd_rl_sessions)
+
+    rl_export_p = rl_sub.add_parser("export", help="Export RL sessions as training data")
+    rl_export_p.add_argument("--format", help="Export format (grpo, dpo, sft)")
+    rl_export_p.add_argument("--domain", help="Filter by domain")
+    rl_export_p.add_argument("--min-score-gap", type=float, help="Min score gap")
+    rl_export_p.add_argument("--limit", type=int, help="Max sessions")
+    rl_export_p.add_argument("--output", "-o", help="Output file path")
+    rl_export_p.set_defaults(func=cmd_rl_export)
+
+    rl_stats_p = rl_sub.add_parser("stats", help="Show RL statistics")
+    rl_stats_p.add_argument("--domain", help="Filter by domain")
+    rl_stats_p.add_argument("--env-type", help="Filter by environment type")
+    rl_stats_p.set_defaults(func=cmd_rl_stats)
+
+    rl_curriculum_p = rl_sub.add_parser("curriculum", help="Get adaptive curriculum batch")
+    rl_curriculum_p.add_argument("--batch-size", type=int, default=64)
+    rl_curriculum_p.add_argument("--domain", help="Filter by domain")
+    rl_curriculum_p.add_argument("--seed", type=int, help="Random seed")
+    rl_curriculum_p.add_argument("--json", action="store_true")
+    rl_curriculum_p.set_defaults(func=cmd_rl_curriculum)
+
+    # ── route ────────────────────────────────────────────────────
+    route_p = sub.add_parser("route", help="Route a prompt to the best model")
+    route_p.add_argument("prompt", nargs="?", help="The prompt to route")
+    route_p.add_argument("--strategy", default="quality_first",
+                         choices=["quality_first", "cost_first", "balanced"],
+                         help="Routing strategy")
+    route_p.add_argument("--max-candidates", type=int, default=5)
+    route_p.add_argument("--router", help="Named router to use")
+    route_p.add_argument("--json", action="store_true")
+    route_p.set_defaults(func=cmd_route)
+
     # ── task ─────────────────────────────────────────────────────
     task_p = sub.add_parser("task", help="Manage tasks")
     task_sub = task_p.add_subparsers(dest="task_command", help="Task commands")
@@ -1448,6 +2526,14 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.command == "env" and not getattr(args, "env_command", None):
         parser.parse_args(["env", "--help"])
+        sys.exit(0)
+
+    if args.command == "run" and not getattr(args, "run_command", None):
+        parser.parse_args(["run", "--help"])
+        sys.exit(0)
+
+    if args.command == "rl" and not getattr(args, "rl_command", None):
+        parser.parse_args(["rl", "--help"])
         sys.exit(0)
 
     if args.command == "namespace" and not getattr(args, "ns_command", None):
