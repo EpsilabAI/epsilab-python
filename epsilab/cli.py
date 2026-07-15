@@ -519,6 +519,62 @@ def cmd_env_qualify(args: argparse.Namespace) -> None:
 # ── namespace commands ───────────────────────────────────────────────
 
 
+def cmd_task_create(args: argparse.Namespace) -> None:
+    """Create a single task from CLI args or a JSON file."""
+    client = _get_client()
+    try:
+        if args.file:
+            task_data = json.loads(Path(args.file).read_text())
+            if isinstance(task_data, list):
+                result = client.upload_custom_tasks(task_data)
+                _ok(f"Uploaded {len(task_data)} tasks")
+                _ok(f"  created: {result.created}  skipped: {result.skipped}")
+                return
+        else:
+            task_data = {
+                "task_id": args.task_id,
+                "prompt": args.prompt,
+                "domain": args.domain or "general",
+                "capability": args.capability or "general",
+                "difficulty": args.difficulty or "medium",
+            }
+            if args.expected_answer:
+                task_data["expected_answer"] = args.expected_answer
+
+        result = client.create_task(task_data)
+        _ok(f"Task created: {result.get('task_id', '?')}")
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def cmd_task_list(args: argparse.Namespace) -> None:
+    """List tasks visible to the current tenant."""
+    client = _get_client()
+    try:
+        result = client.list_tasks(
+            domain=args.domain,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        tasks = result.get("tasks", result) if isinstance(result, dict) else result
+        if not tasks:
+            _ok("No tasks found.")
+            return
+        for t in tasks:
+            tid = t.get("task_id", "?")
+            domain = t.get("domain", "")
+            diff = t.get("difficulty", "")
+            prompt = (t.get("prompt", "") or "")[:80]
+            _ok(f"  {tid}  [{domain}/{diff}]  {prompt}")
+        _ok(f"\n{len(tasks)} task(s)")
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
 def cmd_namespace_create(args: argparse.Namespace) -> None:
     client = _get_client()
     try:
@@ -1122,6 +1178,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="qualification",
     )
     qualify_p.set_defaults(func=cmd_env_qualify)
+
+    # ── task ─────────────────────────────────────────────────────
+    task_p = sub.add_parser("task", help="Manage tasks")
+    task_sub = task_p.add_subparsers(dest="task_command", help="Task commands")
+
+    task_create_p = task_sub.add_parser("create", help="Create a task")
+    task_create_p.add_argument("task_id", nargs="?", help="Task ID")
+    task_create_p.add_argument("--prompt", help="Task prompt text")
+    task_create_p.add_argument("--domain", help="Task domain (e.g. economics)")
+    task_create_p.add_argument("--capability", help="Task capability (e.g. resource_management)")
+    task_create_p.add_argument("--difficulty", choices=["easy", "medium", "hard"], help="Difficulty level")
+    task_create_p.add_argument("--expected-answer", help="Expected answer text")
+    task_create_p.add_argument("--file", "-f", help="JSON file with task(s) — single object or array")
+    task_create_p.set_defaults(func=cmd_task_create)
+
+    task_list_p = task_sub.add_parser("list", help="List tasks")
+    task_list_p.add_argument("--domain", help="Filter by domain")
+    task_list_p.add_argument("--limit", type=int, default=50)
+    task_list_p.add_argument("--offset", type=int, default=0)
+    task_list_p.set_defaults(func=cmd_task_list)
 
     # ── namespace ────────────────────────────────────────────────
     ns_p = sub.add_parser("namespace", help="Manage namespaces")
