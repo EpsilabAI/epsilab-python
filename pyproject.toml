@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epsilab"
-version = "0.9.0"
-description = "Python SDK for the Epsilab model evaluation and improvement platform."
+version = "0.10.0"
+description = "Python SDK and CLI for the Epsilab RL Environment Hub and Marketplace."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [ { name = "Epsilab" } ]
@@ -14,7 +14,7 @@ dependencies = [
   "httpx>=0.27.0",
   "python-dotenv>=1.0.1",
 ]
-keywords = ["ai", "evaluation", "llm", "fine-tuning", "training-data"]
+keywords = ["ai", "evaluation", "llm", "fine-tuning", "training-data", "rl-environments", "marketplace"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -28,6 +28,9 @@ classifiers = [
   "Operating System :: OS Independent",
   "Typing :: Typed",
 ]
+
+[project.scripts]
+epsilab = "epsilab.cli:main"
 
 [project.urls]
 Homepage = "https://www.epsilab.com"

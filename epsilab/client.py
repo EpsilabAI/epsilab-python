@@ -1,8 +1,8 @@
-"""Epsilab Python SDK — main client module.
+"""Epsilab Python SDK, main client module.
 
-Provides :class:`EpsilabClient`, the primary interface for submitting
-evaluations, retrieving results, managing tasks, and exporting
-training data.  Importable as ``from epsilab import Epsilab``.
+Provides :class:`EpsilabClient`, the primary interface for the
+RL Environment Hub and Marketplace, model evaluations, and training
+data export.  Importable as ``from epsilab import Epsilab``.
 """
 
 from __future__ import annotations
@@ -26,6 +26,10 @@ from .models import (
     ArtifactSummary,
     CostEstimate,
     CustomTaskUploadResult,
+    EnvironmentListing,
+    EnvironmentRelease,
+    EnvironmentSession,
+    EnvironmentStepResult,
     EvaluationResult,
     GapSummary,
     RLSession,
@@ -2274,4 +2278,1791 @@ class EpsilabClient:
             "GET",
             "/v1/billing/ledger",
             params={"limit": limit, "offset": offset},
+        )
+
+    # ══════════════════════════════════════════════════════════════════
+    # Environment Hub & Marketplace
+    # ══════════════════════════════════════════════════════════════════
+
+    # ── Discovery & catalog ──────────────────────────────────────────
+
+    def list_environment_listings(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List["EnvironmentListing"]:
+        """Browse environment listings you have access to.
+
+        Returns listings you own plus any you have entitlements for.
+
+        Args:
+            limit: Max results (1-200, default 50).
+            offset: Pagination offset.
+
+        Returns:
+            List of :class:`~epsilab.models.EnvironmentListing`.
+        """
+        data = self._request(
+            "GET",
+            "/v1/environment-listings",
+            params={"limit": limit, "offset": offset},
+        )
+        items = data if isinstance(data, list) else data.get("listings", data.get("items", []))
+        return [EnvironmentListing.from_dict(d) for d in items]
+
+    def list_public_listings(
+        self,
+        *,
+        query: Optional[str] = None,
+        sort_by: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Browse the public marketplace catalog.
+
+        Args:
+            query: Free-text search query.
+            sort_by: Sort order — ``popular``, ``newest``, ``quality``.
+            limit: Max results (1-200, default 50).
+            offset: Pagination offset.
+
+        Returns:
+            List of public listing summaries.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if query:
+            params["query"] = query
+        if sort_by:
+            params["sort_by"] = sort_by
+        return self._request("GET", "/public/listings", params=params)
+
+    def search_environments(
+        self,
+        *,
+        query: Optional[str] = None,
+        domain: Optional[str] = None,
+        env_type: Optional[str] = None,
+        badge_type: Optional[str] = None,
+        difficulty: Optional[str] = None,
+        min_quality_score: Optional[float] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Search environments by quality, domain, difficulty, and more.
+
+        Uses the quality-weighted search index for ranked results.
+
+        Args:
+            query: Free-text search.
+            domain: Filter by domain (e.g. ``coding``, ``math``).
+            env_type: Filter by environment type.
+            badge_type: Filter by quality badge (e.g. ``gold``).
+            difficulty: Filter by difficulty level.
+            min_quality_score: Minimum quality score (0.0-1.0).
+            limit: Max results (1-200, default 50).
+            offset: Pagination offset.
+
+        Returns:
+            Ranked list of matching environments.
+        """
+        body: Dict[str, Any] = {}
+        if query:
+            body["query"] = query
+        if domain:
+            body["domain"] = domain
+        if env_type:
+            body["env_type"] = env_type
+        if badge_type:
+            body["badge_type"] = badge_type
+        if difficulty:
+            body["difficulty"] = difficulty
+        if min_quality_score is not None:
+            body["min_quality_score"] = min_quality_score
+        return self._request(
+            "POST",
+            "/v1/environment-search",
+            json_body=body,
+            params={"limit": limit, "offset": offset},
+        )
+
+    def get_environment_release(self, release_id: str) -> "EnvironmentRelease":
+        """Get details of a specific environment release.
+
+        Args:
+            release_id: The release ID to retrieve.
+
+        Returns:
+            An :class:`~epsilab.models.EnvironmentRelease`.
+        """
+        data = self._request(
+            "GET",
+            f"/v1/environment-releases/{self._path_segment(release_id)}",
+        )
+        return EnvironmentRelease.from_dict(data)
+
+    # ── Hosted sessions ──────────────────────────────────────────────
+
+    def create_environment_session(
+        self,
+        deployment_id: str,
+        *,
+        task_id: str,
+        seed: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> "EnvironmentSession":
+        """Create a hosted environment session.
+
+        Provisions a sandboxed environment instance and returns the
+        initial observation once ready.
+
+        Args:
+            deployment_id: The deployment to run on.
+            task_id: Task to execute in this session.
+            seed: Optional seed for reproducible episodes.
+            idempotency_key: Unique key to prevent duplicate creation.
+
+        Returns:
+            An :class:`~epsilab.models.EnvironmentSession` with the
+            session token for subsequent step calls.
+        """
+        body: Dict[str, Any] = {"task_id": task_id}
+        if seed is not None:
+            body["seed"] = seed
+        headers: Dict[str, str] = {}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        data = self._request(
+            "POST",
+            f"/v1/environment-deployments/{self._path_segment(deployment_id)}/sessions",
+            json_body=body,
+        )
+        return EnvironmentSession.from_dict(data)
+
+    def get_environment_session(self, session_id: str) -> "EnvironmentSession":
+        """Get the current state of an environment session.
+
+        Args:
+            session_id: The session to inspect.
+
+        Returns:
+            An :class:`~epsilab.models.EnvironmentSession`.
+        """
+        data = self._request(
+            "GET",
+            f"/v1/environment-sessions/{self._path_segment(session_id)}",
+        )
+        return EnvironmentSession.from_dict(data)
+
+    def environment_step(
+        self,
+        session_id: str,
+        action: str,
+        *,
+        session_token: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> "EnvironmentStepResult":
+        """Take an action in a hosted environment session.
+
+        The ``session_token`` authenticates this request independently
+        of the API key; it was returned when the session was created.
+
+        Args:
+            session_id: Session to step.
+            action: Action string (format depends on environment).
+            session_token: Session-scoped bearer token. If not provided,
+                the default API key authorization is used.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            An :class:`~epsilab.models.EnvironmentStepResult` with
+            observation, reward, and terminal flags.
+        """
+        extra_headers: Dict[str, str] = {}
+        if session_token:
+            extra_headers["X-RL-Session-Token"] = session_token
+        if idempotency_key:
+            extra_headers["Idempotency-Key"] = idempotency_key
+        data = self._request(
+            "POST",
+            f"/v1/environment-sessions/{self._path_segment(session_id)}/step",
+            json_body={"action": action},
+        )
+        return EnvironmentStepResult.from_dict(data)
+
+    def cancel_environment_session(
+        self,
+        session_id: str,
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Cancel an active environment session.
+
+        Args:
+            session_id: Session to cancel.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            Dict with the final session state.
+        """
+        return self._request(
+            "POST",
+            f"/v1/environment-sessions/{self._path_segment(session_id)}/cancel",
+        )
+
+    def refresh_session_token(self, session_id: str) -> Dict[str, Any]:
+        """Refresh the session token for a long-running session.
+
+        Args:
+            session_id: Session whose token to refresh.
+
+        Returns:
+            Dict with ``session_id``, ``session_token``, and
+            ``session_token_expires_at``.
+        """
+        return self._request(
+            "POST",
+            f"/v1/environment-sessions/{self._path_segment(session_id)}/token",
+        )
+
+    def run_environment_episode(
+        self,
+        deployment_id: str,
+        *,
+        task_id: str,
+        policy_fn: Any,
+        seed: Optional[int] = None,
+        max_steps: int = 100,
+        idempotency_key: Optional[str] = None,
+    ) -> "EnvironmentSession":
+        """Run a complete environment episode using your policy function.
+
+        Convenience wrapper that creates a session, steps until done or
+        ``max_steps``, then returns the final session. Your ``policy_fn``
+        receives ``(observation: str, info: dict)`` and returns an action
+        string.
+
+        Args:
+            deployment_id: Deployment to run on.
+            task_id: Task to execute.
+            policy_fn: Callable ``(observation, info) -> action``.
+            seed: Optional seed for reproducibility.
+            max_steps: Safety limit on steps.
+            idempotency_key: Unique key for session creation.
+
+        Returns:
+            The final :class:`~epsilab.models.EnvironmentSession`.
+        """
+        session = self.create_environment_session(
+            deployment_id,
+            task_id=task_id,
+            seed=seed,
+            idempotency_key=idempotency_key,
+        )
+        token = session.session_token
+        obs = session.observation or ""
+        info: Dict[str, Any] = {}
+
+        for _ in range(max_steps):
+            action = policy_fn(obs, info)
+            result = self.environment_step(
+                session.session_id,
+                action,
+                session_token=token,
+            )
+            obs = result.observation
+            info = result.info
+            if result.done:
+                break
+
+        return self.get_environment_session(session.session_id)
+
+    # ── Entitlements ─────────────────────────────────────────────────
+
+    def list_entitlements(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List environment entitlements for your account.
+
+        Returns entitlements you've been granted (as a buyer) or
+        that you've issued (as a creator).
+
+        Args:
+            limit: Max results (1-200, default 50).
+            offset: Pagination offset.
+
+        Returns:
+            List of entitlement records.
+        """
+        return self._request(
+            "GET",
+            "/v1/environment-entitlements",
+            params={"limit": limit, "offset": offset},
+        )
+
+    def grant_entitlement(
+        self,
+        *,
+        grantee_tenant_id: str,
+        listing_id: str,
+        license_id: str,
+        permissions: Optional[List[str]] = None,
+        starts_at: Optional[str] = None,
+        expires_at: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Grant a buyer access to one of your environment listings.
+
+        Creator-only operation.
+
+        Args:
+            grantee_tenant_id: Tenant ID of the buyer to grant.
+            listing_id: Your listing to grant access to.
+            license_id: License under which access is granted.
+            permissions: Optional permission list (default: all).
+            starts_at: ISO-8601 timestamp when access begins.
+            expires_at: ISO-8601 timestamp when access expires.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created entitlement record.
+        """
+        body: Dict[str, Any] = {
+            "grantee_tenant_id": grantee_tenant_id,
+            "listing_id": listing_id,
+            "license_id": license_id,
+        }
+        if permissions:
+            body["permissions"] = permissions
+        if starts_at:
+            body["starts_at"] = starts_at
+        if expires_at:
+            body["expires_at"] = expires_at
+        return self._request(
+            "POST",
+            "/v1/environment-entitlements",
+            json_body=body,
+        )
+
+    def revoke_entitlement(
+        self,
+        entitlement_id: str,
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Revoke a previously granted entitlement.
+
+        Creator-only operation.
+
+        Args:
+            entitlement_id: The entitlement to revoke.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The updated entitlement record.
+        """
+        return self._request(
+            "POST",
+            f"/v1/environment-entitlements/{self._path_segment(entitlement_id)}/revoke",
+        )
+
+    # ── Exports & batches ────────────────────────────────────────────
+
+    def create_environment_export(
+        self,
+        *,
+        deployment_id: str,
+        format: str,
+        filter_env_type: Optional[str] = None,
+        filter_domain: Optional[str] = None,
+        filter_task_ids: Optional[List[str]] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Start an export job for environment session data.
+
+        Args:
+            deployment_id: Deployment to export from.
+            format: Export format (``dpo``, ``sft``, ``grpo``, ``jsonl``, etc.).
+            filter_env_type: Filter sessions by environment type.
+            filter_domain: Filter sessions by domain.
+            filter_task_ids: Filter to specific task IDs.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            Export job record with ``export_id`` and ``status``.
+        """
+        body: Dict[str, Any] = {
+            "deployment_id": deployment_id,
+            "format": format,
+        }
+        if filter_env_type:
+            body["filter_env_type"] = filter_env_type
+        if filter_domain:
+            body["filter_domain"] = filter_domain
+        if filter_task_ids:
+            body["filter_task_ids"] = filter_task_ids
+        return self._request(
+            "POST",
+            "/v1/environment-exports",
+            json_body=body,
+        )
+
+    def get_environment_export(self, export_id: str) -> Dict[str, Any]:
+        """Get the status and details of an export job.
+
+        Args:
+            export_id: The export job to inspect.
+
+        Returns:
+            Export job record.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-exports/{self._path_segment(export_id)}",
+        )
+
+    def list_environment_exports(
+        self,
+        *,
+        deployment_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List export jobs.
+
+        Args:
+            deployment_id: Filter by deployment.
+            status: Filter by status (``pending``, ``completed``, ``failed``).
+            limit: Max results (1-200, default 50).
+            offset: Pagination offset.
+
+        Returns:
+            List of export job records.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if deployment_id:
+            params["deployment_id"] = deployment_id
+        if status:
+            params["status"] = status
+        return self._request("GET", "/v1/environment-exports", params=params)
+
+    def create_batch(
+        self,
+        *,
+        deployment_id: str,
+        name: str,
+        task_seed_pairs: List[Dict[str, Any]],
+        max_credits: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Start a batch evaluation across multiple tasks.
+
+        Args:
+            deployment_id: Deployment to run on.
+            name: Human-readable batch name.
+            task_seed_pairs: List of ``{"task_id": ..., "seed": ...}`` dicts.
+            max_credits: Optional credit cap.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            Batch record with ``batch_id`` and ``status``.
+        """
+        body: Dict[str, Any] = {
+            "deployment_id": deployment_id,
+            "name": name,
+            "task_seed_pairs": task_seed_pairs,
+        }
+        if max_credits is not None:
+            body["max_credits"] = max_credits
+        return self._request("POST", "/v1/environment-batches", json_body=body)
+
+    def get_batch(self, batch_id: str) -> Dict[str, Any]:
+        """Get batch status and progress.
+
+        Args:
+            batch_id: The batch to inspect.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-batches/{self._path_segment(batch_id)}",
+        )
+
+    def list_batches(
+        self,
+        *,
+        deployment_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List batch jobs.
+
+        Args:
+            deployment_id: Filter by deployment.
+            status: Filter by status.
+            limit: Max results (1-200, default 50).
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if deployment_id:
+            params["deployment_id"] = deployment_id
+        if status:
+            params["status"] = status
+        return self._request("GET", "/v1/environment-batches", params=params)
+
+    def get_batch_sessions(self, batch_id: str) -> List[Dict[str, Any]]:
+        """Get the sessions produced by a batch.
+
+        Args:
+            batch_id: The batch to inspect.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-batches/{self._path_segment(batch_id)}/sessions",
+        )
+
+    def cancel_batch(self, batch_id: str) -> Dict[str, Any]:
+        """Cancel a running batch.
+
+        Args:
+            batch_id: The batch to cancel.
+        """
+        return self._request(
+            "POST",
+            f"/v1/environment-batches/{self._path_segment(batch_id)}/cancel",
+        )
+
+    def get_batch_comparison(self, batch_id: str) -> Dict[str, Any]:
+        """Get the comparison report for a completed batch.
+
+        Args:
+            batch_id: The batch to inspect.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-batches/{self._path_segment(batch_id)}/comparison",
+        )
+
+    # ── Disputes & audit ─────────────────────────────────────────────
+
+    def create_dispute(
+        self,
+        *,
+        session_id: str,
+        deployment_id: str,
+        release_id: str,
+        dispute_type: str,
+        summary: str,
+        severity: Optional[str] = None,
+        evidence_digest: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """File a dispute about a session outcome.
+
+        Args:
+            session_id: The session being disputed.
+            deployment_id: Deployment the session ran on.
+            release_id: Release version involved.
+            dispute_type: Type of dispute (e.g. ``reward_error``,
+                ``environment_bug``, ``verifier_disagreement``).
+            summary: Description of the issue.
+            severity: Optional severity (``low``, ``medium``, ``high``,
+                ``critical``).
+            evidence_digest: SHA-256 digest of supporting evidence.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created dispute record.
+        """
+        body: Dict[str, Any] = {
+            "session_id": session_id,
+            "deployment_id": deployment_id,
+            "release_id": release_id,
+            "dispute_type": dispute_type,
+            "summary": summary,
+        }
+        if severity:
+            body["severity"] = severity
+        if evidence_digest:
+            body["evidence_digest"] = evidence_digest
+        return self._request("POST", "/v1/environment-disputes", json_body=body)
+
+    def get_dispute(self, dispute_id: str) -> Dict[str, Any]:
+        """Get details of a dispute.
+
+        Args:
+            dispute_id: The dispute to inspect.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-disputes/{self._path_segment(dispute_id)}",
+        )
+
+    def list_disputes(
+        self,
+        *,
+        release_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List disputes.
+
+        Args:
+            release_id: Filter by release.
+            status: Filter by status.
+            limit: Max results (1-200, default 50).
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if release_id:
+            params["release_id"] = release_id
+        if status:
+            params["status"] = status
+        return self._request("GET", "/v1/environment-disputes", params=params)
+
+    def get_session_audit(
+        self,
+        session_id: str,
+        *,
+        event_type: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Get the audit trail for a session.
+
+        Args:
+            session_id: Session to audit.
+            event_type: Filter by event type.
+            limit: Max results.
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if event_type:
+            params["event_type"] = event_type
+        return self._request(
+            "GET",
+            f"/v1/environment-sessions/{self._path_segment(session_id)}/audit",
+            params=params,
+        )
+
+    # ── Quality & badges ─────────────────────────────────────────────
+
+    def list_quality_reports(
+        self,
+        *,
+        release_id: Optional[str] = None,
+        report_type: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List environment quality reports.
+
+        Args:
+            release_id: Filter by release.
+            report_type: Filter by report type (e.g. ``qualification``,
+                ``regression``, ``benchmark``).
+            status: Filter by status (``pending``, ``running``, ``completed``).
+            limit: Max results.
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if release_id:
+            params["release_id"] = release_id
+        if report_type:
+            params["report_type"] = report_type
+        if status:
+            params["status"] = status
+        return self._request("GET", "/v1/environment-quality-reports", params=params)
+
+    def get_quality_report(self, report_id: str) -> Dict[str, Any]:
+        """Get a quality report.
+
+        Args:
+            report_id: The report to retrieve.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-quality-reports/{self._path_segment(report_id)}",
+        )
+
+    def get_quality_checks(self, report_id: str) -> List[Dict[str, Any]]:
+        """Get individual checks within a quality report.
+
+        Args:
+            report_id: The parent report.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-quality-reports/{self._path_segment(report_id)}/checks",
+        )
+
+    def list_quality_badges(
+        self,
+        *,
+        release_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List quality badges awarded to releases.
+
+        Args:
+            release_id: Filter by release.
+            status: Filter by badge status.
+            limit: Max results.
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if release_id:
+            params["release_id"] = release_id
+        if status:
+            params["status"] = status
+        return self._request("GET", "/v1/environment-quality-badges", params=params)
+
+    def list_contamination_findings(
+        self,
+        *,
+        release_id: Optional[str] = None,
+        finding_type: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List contamination findings for releases.
+
+        Args:
+            release_id: Filter by release.
+            finding_type: Filter by finding type.
+            limit: Max results.
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if release_id:
+            params["release_id"] = release_id
+        if finding_type:
+            params["finding_type"] = finding_type
+        return self._request("GET", "/v1/environment-contamination", params=params)
+
+    def list_benchmark_results(
+        self,
+        *,
+        report_id: Optional[str] = None,
+        release_id: Optional[str] = None,
+        model_tag: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List benchmark results for environment releases.
+
+        Args:
+            report_id: Filter by quality report.
+            release_id: Filter by release.
+            model_tag: Filter by model used in the benchmark.
+            limit: Max results.
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if report_id:
+            params["report_id"] = report_id
+        if release_id:
+            params["release_id"] = release_id
+        if model_tag:
+            params["model_tag"] = model_tag
+        return self._request("GET", "/v1/environment-benchmark-results", params=params)
+
+    # ── Environment billing ──────────────────────────────────────────
+
+    def list_license_versions(
+        self,
+        release_id: str,
+    ) -> List[Dict[str, Any]]:
+        """List license versions for a release.
+
+        Args:
+            release_id: The release to query.
+        """
+        return self._request(
+            "GET",
+            "/v1/environment-license-versions",
+            params={"release_id": release_id},
+        )
+
+    def get_license_version(self, license_version_id: str) -> Dict[str, Any]:
+        """Get a specific license version.
+
+        Args:
+            license_version_id: The license version to retrieve.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-license-versions/{self._path_segment(license_version_id)}",
+        )
+
+    def list_session_charges(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        billable_only: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        """List session charges on your account.
+
+        Args:
+            session_id: Filter to a specific session.
+            billable_only: If True, only billable charges.
+        """
+        params: Dict[str, Any] = {}
+        if session_id:
+            params["session_id"] = session_id
+        if billable_only is not None:
+            params["billable_only"] = str(billable_only).lower()
+        return self._request("GET", "/v1/environment-session-charges", params=params)
+
+    def list_charge_adjustments(
+        self,
+        *,
+        charge_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List charge adjustments (credits, refunds, dispute resolutions).
+
+        Args:
+            charge_id: Filter to a specific charge.
+        """
+        params: Dict[str, Any] = {}
+        if charge_id:
+            params["charge_id"] = charge_id
+        return self._request("GET", "/v1/environment-charge-adjustments", params=params)
+
+    def list_invoices(self) -> List[Dict[str, Any]]:
+        """List environment invoices."""
+        return self._request("GET", "/v1/environment-invoices")
+
+    def get_invoice(self, invoice_id: str) -> Dict[str, Any]:
+        """Get a specific invoice.
+
+        Args:
+            invoice_id: The invoice to retrieve.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-invoices/{self._path_segment(invoice_id)}",
+        )
+
+    def get_invoice_line_items(self, invoice_id: str) -> List[Dict[str, Any]]:
+        """Get line items for an invoice.
+
+        Args:
+            invoice_id: The invoice to inspect.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-invoices/{self._path_segment(invoice_id)}/line-items",
+        )
+
+    def get_charge_summary(
+        self,
+        *,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get an aggregated charge summary for a time range.
+
+        Args:
+            since: ISO-8601 start date.
+            until: ISO-8601 end date.
+        """
+        params: Dict[str, Any] = {}
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+        return self._request("GET", "/v1/environment-charge-summary", params=params)
+
+    # ── Reviews & purchases ──────────────────────────────────────────
+
+    def create_review(
+        self,
+        *,
+        listing_id: str,
+        listing_owner_tenant_id: str,
+        rating: int,
+        title: str,
+        body: Optional[str] = None,
+        usage_hours: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Submit a review for an environment listing.
+
+        Args:
+            listing_id: The listing to review.
+            listing_owner_tenant_id: Tenant ID of the listing creator.
+            rating: Rating (1-5).
+            title: Review title.
+            body: Optional review body text.
+            usage_hours: Optional hours of usage to report.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created review record.
+        """
+        payload: Dict[str, Any] = {
+            "listing_id": listing_id,
+            "listing_owner_tenant_id": listing_owner_tenant_id,
+            "rating": rating,
+            "title": title,
+        }
+        if body:
+            payload["body"] = body
+        if usage_hours is not None:
+            payload["usage_hours"] = usage_hours
+        return self._request("POST", "/reviews", json_body=payload)
+
+    def list_reviews(
+        self,
+        listing_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List reviews for a listing.
+
+        Args:
+            listing_id: The listing to get reviews for.
+            limit: Max results.
+            offset: Pagination offset.
+        """
+        return self._request(
+            "GET",
+            f"/reviews/{self._path_segment(listing_id)}",
+            params={"limit": limit, "offset": offset},
+        )
+
+    def create_purchase(
+        self,
+        *,
+        listing_id: str,
+        listing_owner_tenant_id: str,
+        amount_cents: int,
+        license_version_id: Optional[str] = None,
+        currency: str = "usd",
+        payment_reference: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Purchase access to an environment listing.
+
+        Args:
+            listing_id: The listing to purchase.
+            listing_owner_tenant_id: Creator's tenant ID.
+            amount_cents: Purchase price in cents.
+            license_version_id: Optional specific license version.
+            currency: Currency code (default ``usd``).
+            payment_reference: Optional external payment reference.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The purchase record.
+        """
+        payload: Dict[str, Any] = {
+            "listing_id": listing_id,
+            "listing_owner_tenant_id": listing_owner_tenant_id,
+            "amount_cents": amount_cents,
+            "currency": currency,
+        }
+        if license_version_id:
+            payload["license_version_id"] = license_version_id
+        if payment_reference:
+            payload["payment_reference"] = payment_reference
+        return self._request("POST", "/purchases", json_body=payload)
+
+    def list_purchases(
+        self,
+        *,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List your purchases.
+
+        Args:
+            status: Filter by purchase status.
+            limit: Max results.
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if status:
+            params["status"] = status
+        return self._request("GET", "/purchases", params=params)
+
+    # ── Notifications ────────────────────────────────────────────────
+
+    def list_notifications(
+        self,
+        *,
+        unread_only: Optional[bool] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List marketplace notifications.
+
+        Args:
+            unread_only: If True, only unread notifications.
+            limit: Max results.
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if unread_only is not None:
+            params["unread_only"] = str(unread_only).lower()
+        return self._request("GET", "/notifications", params=params)
+
+    def mark_notification_read(self, notification_id: str) -> Dict[str, Any]:
+        """Mark a notification as read.
+
+        Args:
+            notification_id: The notification to mark.
+        """
+        return self._request(
+            "POST",
+            f"/notifications/{self._path_segment(notification_id)}/read",
+        )
+
+    # ── Creator: registry & publishing ───────────────────────────────
+
+    def create_namespace(
+        self,
+        *,
+        slug: str,
+        display_name: str,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create an environment namespace (creator operation).
+
+        A namespace groups your listings (e.g. ``my-org/env-name``).
+
+        Args:
+            slug: URL-safe namespace slug (3-64 chars).
+            display_name: Human-readable name.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created namespace record.
+        """
+        return self._request(
+            "POST",
+            "/v1/environment-namespaces",
+            json_body={"slug": slug, "display_name": display_name},
+        )
+
+    def create_listing(
+        self,
+        *,
+        namespace_id: str,
+        slug: str,
+        title: str,
+        summary: Optional[str] = None,
+        visibility: str = "private",
+        idempotency_key: Optional[str] = None,
+    ) -> "EnvironmentListing":
+        """Create an environment listing (creator operation).
+
+        Args:
+            namespace_id: Namespace to create the listing in.
+            slug: URL-safe listing slug.
+            title: Listing title.
+            summary: Short description.
+            visibility: ``private``, ``unlisted``, or ``public``.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created :class:`~epsilab.models.EnvironmentListing`.
+        """
+        body: Dict[str, Any] = {
+            "namespace_id": namespace_id,
+            "slug": slug,
+            "title": title,
+        }
+        if summary:
+            body["summary"] = summary
+        if visibility:
+            body["visibility"] = visibility
+        data = self._request("POST", "/v1/environment-listings", json_body=body)
+        return EnvironmentListing.from_dict(data)
+
+    def update_listing(
+        self,
+        listing_id: str,
+        *,
+        expected_revision: int,
+        title: Optional[str] = None,
+        summary: Optional[str] = None,
+        visibility: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> "EnvironmentListing":
+        """Update a listing's metadata (creator operation).
+
+        Requires ``expected_revision`` for optimistic concurrency control.
+
+        Args:
+            listing_id: The listing to update.
+            expected_revision: Current revision number (prevents conflicts).
+            title: New title.
+            summary: New summary.
+            visibility: New visibility.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The updated :class:`~epsilab.models.EnvironmentListing`.
+        """
+        body: Dict[str, Any] = {"expected_revision": expected_revision}
+        if title:
+            body["title"] = title
+        if summary:
+            body["summary"] = summary
+        if visibility:
+            body["visibility"] = visibility
+        data = self._request(
+            "PATCH",
+            f"/v1/environment-listings/{self._path_segment(listing_id)}",
+            json_body=body,
+        )
+        return EnvironmentListing.from_dict(data)
+
+    def create_task_pack_release(
+        self,
+        *,
+        namespace_id: str,
+        name: str,
+        release_version: str,
+        artifact_ref: str,
+        artifact_digest: str,
+        usage_policy: str,
+        license_id: str,
+        members: Optional[List[Dict[str, Any]]] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Register a task pack release (creator operation).
+
+        A task pack defines the set of tasks available in the environment.
+
+        Args:
+            namespace_id: Namespace this release belongs to.
+            name: Task pack name.
+            release_version: Semantic version.
+            artifact_ref: OCI or URI reference to the task pack artifact.
+            artifact_digest: SHA-256 content digest.
+            usage_policy: Usage policy identifier.
+            license_id: License governing this task pack.
+            members: Optional list of task member definitions.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created release record.
+        """
+        body: Dict[str, Any] = {
+            "namespace_id": namespace_id,
+            "name": name,
+            "release_version": release_version,
+            "artifact_ref": artifact_ref,
+            "artifact_digest": artifact_digest,
+            "usage_policy": usage_policy,
+            "license_id": license_id,
+        }
+        if members:
+            body["members"] = members
+        return self._request("POST", "/v1/task-pack-releases", json_body=body)
+
+    def create_verifier_release(
+        self,
+        *,
+        namespace_id: str,
+        name: str,
+        release_version: str,
+        runtime_ref: str,
+        runtime_digest: str,
+        source_digest: str,
+        evidence_schema_digest: str,
+        reward_mode: str,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        timeout_seconds: Optional[int] = None,
+        nondeterministic: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Register a verifier release (creator operation).
+
+        A verifier provides the reward function for the environment.
+
+        Args:
+            namespace_id: Namespace this release belongs to.
+            name: Verifier name.
+            release_version: Semantic version.
+            runtime_ref: OCI or URI reference to the verifier runtime.
+            runtime_digest: SHA-256 digest of the runtime image.
+            source_digest: SHA-256 digest of the verifier source code.
+            evidence_schema_digest: Digest of the evidence JSON schema.
+            reward_mode: ``binary``, ``continuous``, or ``partial_credit``.
+            reward_min: Minimum reward value (for continuous mode).
+            reward_max: Maximum reward value (for continuous mode).
+            timeout_seconds: Verification timeout.
+            nondeterministic: Whether the verifier is nondeterministic.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created release record.
+        """
+        body: Dict[str, Any] = {
+            "namespace_id": namespace_id,
+            "name": name,
+            "release_version": release_version,
+            "runtime_ref": runtime_ref,
+            "runtime_digest": runtime_digest,
+            "source_digest": source_digest,
+            "evidence_schema_digest": evidence_schema_digest,
+            "reward_mode": reward_mode,
+        }
+        if reward_min is not None:
+            body["reward_min"] = reward_min
+        if reward_max is not None:
+            body["reward_max"] = reward_max
+        if timeout_seconds is not None:
+            body["timeout_seconds"] = timeout_seconds
+        if nondeterministic is not None:
+            body["nondeterministic"] = nondeterministic
+        return self._request("POST", "/v1/verifier-releases", json_body=body)
+
+    def create_environment_release(
+        self,
+        *,
+        listing_id: str,
+        release_version: str,
+        protocol_version: str,
+        runtime_ref: str,
+        runtime_digest: str,
+        task_pack_release_id: str,
+        verifier_release_id: str,
+        action_schema_digest: str,
+        observation_schema_digest: str,
+        resource_policy: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> "EnvironmentRelease":
+        """Register an environment release (creator operation).
+
+        Bundles a runtime, task pack, and verifier into a deployable,
+        content-addressed release.
+
+        Args:
+            listing_id: Parent listing.
+            release_version: Semantic version.
+            protocol_version: Protocol version (e.g. ``0.4.1``).
+            runtime_ref: OCI/URI reference to the environment runtime.
+            runtime_digest: SHA-256 digest of the runtime image.
+            task_pack_release_id: Task pack release to include.
+            verifier_release_id: Verifier release to include.
+            action_schema_digest: Digest of the action JSON schema.
+            observation_schema_digest: Digest of the observation JSON schema.
+            resource_policy: Optional resource limits (cpu, memory, gpu).
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created :class:`~epsilab.models.EnvironmentRelease`.
+        """
+        body: Dict[str, Any] = {
+            "listing_id": listing_id,
+            "release_version": release_version,
+            "protocol_version": protocol_version,
+            "runtime_ref": runtime_ref,
+            "runtime_digest": runtime_digest,
+            "task_pack_release_id": task_pack_release_id,
+            "verifier_release_id": verifier_release_id,
+            "action_schema_digest": action_schema_digest,
+            "observation_schema_digest": observation_schema_digest,
+        }
+        if resource_policy:
+            body["resource_policy"] = resource_policy
+        data = self._request("POST", "/v1/environment-releases", json_body=body)
+        return EnvironmentRelease.from_dict(data)
+
+    # ── Creator: deployments ─────────────────────────────────────────
+
+    def create_deployment(
+        self,
+        *,
+        listing_id: str,
+        alias: str,
+        environment_release_id: str,
+        allowed_split: Optional[str] = None,
+        network_policy: Optional[str] = None,
+        trace_policy: Optional[str] = None,
+        export_policy: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a deployment for a release (creator operation).
+
+        A deployment makes a release available for hosted sessions.
+
+        Args:
+            listing_id: Parent listing.
+            alias: Human-readable deployment name.
+            environment_release_id: Release to deploy.
+            allowed_split: Data-split access policy.
+            network_policy: Network policy (``isolated``, ``egress_only``).
+            trace_policy: Trace collection policy.
+            export_policy: Export permission policy.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created deployment record.
+        """
+        body: Dict[str, Any] = {
+            "listing_id": listing_id,
+            "alias": alias,
+            "environment_release_id": environment_release_id,
+        }
+        if allowed_split:
+            body["allowed_split"] = allowed_split
+        if network_policy:
+            body["network_policy"] = network_policy
+        if trace_policy:
+            body["trace_policy"] = trace_policy
+        if export_policy:
+            body["export_policy"] = export_policy
+        return self._request("POST", "/v1/environment-deployments", json_body=body)
+
+    def create_deployment_revision(
+        self,
+        deployment_id: str,
+        *,
+        environment_release_id: str,
+        allowed_split: Optional[str] = None,
+        network_policy: Optional[str] = None,
+        trace_policy: Optional[str] = None,
+        export_policy: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a new revision for an existing deployment (creator operation).
+
+        Revisions allow updating the release or policies without creating
+        a new deployment.
+
+        Args:
+            deployment_id: Deployment to revise.
+            environment_release_id: New release to deploy.
+            allowed_split: Updated data-split policy.
+            network_policy: Updated network policy.
+            trace_policy: Updated trace policy.
+            export_policy: Updated export policy.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The updated deployment record.
+        """
+        body: Dict[str, Any] = {
+            "environment_release_id": environment_release_id,
+        }
+        if allowed_split:
+            body["allowed_split"] = allowed_split
+        if network_policy:
+            body["network_policy"] = network_policy
+        if trace_policy:
+            body["trace_policy"] = trace_policy
+        if export_policy:
+            body["export_policy"] = export_policy
+        return self._request(
+            "POST",
+            f"/v1/environment-deployments/{self._path_segment(deployment_id)}/revisions",
+            json_body=body,
+        )
+
+    # ── Creator: quality management ──────────────────────────────────
+
+    def create_quality_report(
+        self,
+        *,
+        release_id: str,
+        report_type: str,
+        deployment_id: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Start a quality report for a release (creator operation).
+
+        Args:
+            release_id: Release to evaluate.
+            report_type: Type of quality check (``qualification``,
+                ``regression``, ``benchmark``).
+            deployment_id: Optional deployment to test against.
+            config: Optional report configuration.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created quality report record.
+        """
+        body: Dict[str, Any] = {
+            "release_id": release_id,
+            "report_type": report_type,
+        }
+        if deployment_id:
+            body["deployment_id"] = deployment_id
+        if config:
+            body["config"] = config
+        return self._request("POST", "/v1/environment-quality-reports", json_body=body)
+
+    # ── Creator: analytics ───────────────────────────────────────────
+
+    def get_creator_aggregates(
+        self,
+        *,
+        release_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Get aggregated usage analytics for your releases (creator operation).
+
+        Returns session counts, unique buyers, reward distributions, and
+        pass rates per release.
+
+        Args:
+            release_id: Filter to a specific release.
+            limit: Max results.
+            offset: Pagination offset.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if release_id:
+            params["release_id"] = release_id
+        return self._request(
+            "GET",
+            "/v1/environment-creator-aggregates",
+            params=params,
+        )
+
+    # ── Creator: profiles & moderation ───────────────────────────────
+
+    def create_creator_profile(
+        self,
+        *,
+        display_name: str,
+        bio: Optional[str] = None,
+        website_url: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+        contact_email: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create your creator profile (creator operation).
+
+        Args:
+            display_name: Public display name.
+            bio: Short biography.
+            website_url: Link to your website.
+            avatar_url: URL to your avatar image.
+            contact_email: Contact email for buyers.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created profile record.
+        """
+        body: Dict[str, Any] = {"display_name": display_name}
+        if bio:
+            body["bio"] = bio
+        if website_url:
+            body["website_url"] = website_url
+        if avatar_url:
+            body["avatar_url"] = avatar_url
+        if contact_email:
+            body["contact_email"] = contact_email
+        return self._request("POST", "/creator-profiles", json_body=body)
+
+    def get_creator_profile(self) -> Dict[str, Any]:
+        """Get your creator profile."""
+        return self._request("GET", "/creator-profiles/me")
+
+    def update_creator_profile(
+        self,
+        *,
+        display_name: Optional[str] = None,
+        bio: Optional[str] = None,
+        website_url: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+        contact_email: Optional[str] = None,
+        is_public: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Update your creator profile.
+
+        Args:
+            display_name: Updated display name.
+            bio: Updated biography.
+            website_url: Updated website URL.
+            avatar_url: Updated avatar URL.
+            contact_email: Updated contact email.
+            is_public: Whether to make the profile public.
+
+        Returns:
+            The updated profile record.
+        """
+        body: Dict[str, Any] = {}
+        if display_name:
+            body["display_name"] = display_name
+        if bio:
+            body["bio"] = bio
+        if website_url:
+            body["website_url"] = website_url
+        if avatar_url:
+            body["avatar_url"] = avatar_url
+        if contact_email:
+            body["contact_email"] = contact_email
+        if is_public is not None:
+            body["is_public"] = is_public
+        return self._request("PATCH", "/creator-profiles/me", json_body=body)
+
+    def request_publish(
+        self,
+        listing_id: str,
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Request moderation review to publish a listing (creator operation).
+
+        Args:
+            listing_id: The listing to submit for review.
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The publish request record.
+        """
+        return self._request(
+            "POST",
+            "/moderation/publish-request",
+            json_body={"listing_id": listing_id},
+        )
+
+    def create_changelog(
+        self,
+        *,
+        release_id: str,
+        version_label: str,
+        summary: str,
+        body: Optional[str] = None,
+        breaking_changes: Optional[bool] = None,
+        notify_buyers: Optional[bool] = None,
+        listing_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Publish a changelog entry for a release (creator operation).
+
+        Args:
+            release_id: The release this changelog describes.
+            version_label: Version label (e.g. ``1.2.0``).
+            summary: Short summary of changes.
+            body: Full changelog body (Markdown).
+            breaking_changes: Whether this release has breaking changes.
+            notify_buyers: Whether to notify existing buyers.
+            listing_id: Parent listing (for cross-referencing).
+            idempotency_key: Unique key for at-most-once delivery.
+
+        Returns:
+            The created changelog record.
+        """
+        payload: Dict[str, Any] = {
+            "release_id": release_id,
+            "version_label": version_label,
+            "summary": summary,
+        }
+        if body:
+            payload["body"] = body
+        if breaking_changes is not None:
+            payload["breaking_changes"] = breaking_changes
+        if notify_buyers is not None:
+            payload["notify_buyers"] = notify_buyers
+        if listing_id:
+            payload["listing_id"] = listing_id
+        return self._request("POST", "/changelogs", json_body=payload)
+
+    def list_changelogs(
+        self,
+        release_id: str,
+        *,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List changelog entries for a release.
+
+        Args:
+            release_id: The release to get changelogs for.
+            limit: Max results.
+        """
+        return self._request(
+            "GET",
+            f"/changelogs/{self._path_segment(release_id)}",
+            params={"limit": limit},
+        )
+
+    # ── Creator: settlement ──────────────────────────────────────────
+
+    def get_creator_account(self) -> Dict[str, Any]:
+        """Get your creator settlement account.
+
+        Returns balance, payout info, and account status.
+        """
+        return self._request("GET", "/v1/creator-account")
+
+    def list_royalty_rules(self) -> List[Dict[str, Any]]:
+        """List royalty rules configured for your releases."""
+        return self._request("GET", "/v1/creator-royalty-rules")
+
+    def list_accruals(
+        self,
+        *,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List royalty accruals for your releases.
+
+        Args:
+            status: Filter by status (``pending``, ``settled``, ``paid``).
+        """
+        params: Dict[str, Any] = {}
+        if status:
+            params["status"] = status
+        return self._request("GET", "/v1/creator-accruals", params=params)
+
+    def list_settlement_adjustments(self) -> List[Dict[str, Any]]:
+        """List adjustments applied to your settlement account."""
+        return self._request("GET", "/v1/creator-adjustments")
+
+    def list_payout_batches(self) -> List[Dict[str, Any]]:
+        """List payout batches (scheduled and completed transfers)."""
+        return self._request("GET", "/v1/creator-payout-batches")
+
+    def list_creator_statements(self) -> List[Dict[str, Any]]:
+        """List period settlement statements."""
+        return self._request("GET", "/v1/creator-statements")
+
+    # ── Adapters ─────────────────────────────────────────────────────
+
+    def list_adapters(
+        self,
+        *,
+        protocol_family: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List protocol adapters.
+
+        Adapters provide compatibility shims between different
+        environment protocols (e.g. OpenAI Gym → Epsilab Protocol).
+
+        Args:
+            protocol_family: Filter by protocol family.
+            status: Filter by adapter status.
+            limit: Max results.
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if protocol_family:
+            params["protocol_family"] = protocol_family
+        if status:
+            params["status"] = status
+        return self._request("GET", "/adapters", params=params)
+
+    def get_adapter(self, adapter_id: str) -> Dict[str, Any]:
+        """Get adapter details.
+
+        Args:
+            adapter_id: The adapter to inspect.
+        """
+        return self._request(
+            "GET",
+            f"/adapters/{self._path_segment(adapter_id)}",
+        )
+
+    def list_adapter_versions(
+        self,
+        adapter_id: str,
+        *,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List versions of an adapter.
+
+        Args:
+            adapter_id: The adapter.
+            status: Filter by version status.
+        """
+        params: Dict[str, Any] = {}
+        if status:
+            params["status"] = status
+        return self._request(
+            "GET",
+            f"/adapters/{self._path_segment(adapter_id)}/versions",
+            params=params,
+        )
+
+    def get_adapter_conformance(
+        self,
+        adapter_id: str,
+        *,
+        version_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Get conformance test results for an adapter.
+
+        Args:
+            adapter_id: The adapter.
+            version_id: Filter by version.
+            status: Filter by result status.
+            limit: Max results.
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if version_id:
+            params["version_id"] = version_id
+        if status:
+            params["status"] = status
+        return self._request(
+            "GET",
+            f"/adapters/{self._path_segment(adapter_id)}/conformance",
+            params=params,
+        )
+
+    def check_adapter_equivalence(
+        self,
+        adapter_id: str,
+        version_id: str,
+    ) -> Dict[str, Any]:
+        """Check behavioral equivalence for an adapter version.
+
+        Args:
+            adapter_id: The adapter.
+            version_id: The version to check.
+        """
+        return self._request(
+            "GET",
+            f"/adapters/{self._path_segment(adapter_id)}/equivalence/check",
+            params={"version_id": version_id},
+        )
+
+    def report_adapter_usage(
+        self,
+        adapter_id: str,
+        *,
+        version_id: str,
+        event_type: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Report adapter usage telemetry.
+
+        Args:
+            adapter_id: The adapter being used.
+            version_id: Adapter version.
+            event_type: Event type (e.g. ``session_start``, ``session_end``).
+            metadata: Optional event metadata.
+        """
+        body: Dict[str, Any] = {
+            "version_id": version_id,
+            "event_type": event_type,
+        }
+        if metadata:
+            body["metadata"] = metadata
+        return self._request(
+            "POST",
+            "/adapters/usage",
+            json_body=body,
         )

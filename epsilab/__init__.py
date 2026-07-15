@@ -1,11 +1,14 @@
-"""Epsilab Python SDK — evaluate, compare, and improve AI models.
+"""Epsilab Python SDK for the RL Environment Hub and Marketplace.
+
+Search, run, and export training data from verified RL environments,
+or publish your own and earn from usage.
 
 Quick start::
 
     from epsilab import Epsilab
 
     client = Epsilab(api_key="sk-...")
-    eval = client.create_evaluation(["openai/gpt-4o", "google/gemini-2.5-flash"])
+    envs = client.search_environments(domain="coding", min_quality_score=0.8)
 """
 
 from .client import EpsilabClient as Epsilab
@@ -17,7 +20,15 @@ from .exceptions import (
     InsufficientCreditsError,
     RateLimitError,
 )
-from .models import RLSession, RLStepResult, RLTrajectory
+from .models import (
+    EnvironmentListing,
+    EnvironmentRelease,
+    EnvironmentSession,
+    EnvironmentStepResult,
+    RLSession,
+    RLStepResult,
+    RLTrajectory,
+)
 
 __all__ = [
     "Epsilab",
@@ -30,6 +41,10 @@ __all__ = [
     "RLSession",
     "RLStepResult",
     "RLTrajectory",
+    "EnvironmentListing",
+    "EnvironmentRelease",
+    "EnvironmentSession",
+    "EnvironmentStepResult",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"

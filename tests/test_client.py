@@ -19,7 +19,15 @@ from epsilab.exceptions import (
     InsufficientCreditsError,
     RateLimitError,
 )
-from epsilab.models import CostEstimate, EvaluationResult, RunSummary
+from epsilab.models import (
+    CostEstimate,
+    EnvironmentListing,
+    EnvironmentRelease,
+    EnvironmentSession,
+    EnvironmentStepResult,
+    EvaluationResult,
+    RunSummary,
+)
 
 
 def _json_response(body: Any, status: int = 200) -> httpx.Response:
@@ -1995,3 +2003,1598 @@ class TestGetMatrixModelCapabilities:
         assert captured["method"] == "GET"
         assert captured["path"] == "/v1/matrix/models/openai/gpt-4o/capabilities"
         assert result["capabilities"][0]["score"] == 0.9
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Environment Hub & Marketplace
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestListEnvironmentListings:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response(
+                [
+                    {
+                        "listing_id": "lst-1",
+                        "namespace_id": "ns-1",
+                        "slug": "my-env",
+                        "title": "My Env",
+                    }
+                ]
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_environment_listings(limit=10, offset=5)
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/environment-listings"
+        assert captured["params"]["limit"] == "10"
+        assert captured["params"]["offset"] == "5"
+        assert len(result) == 1
+        assert isinstance(result[0], EnvironmentListing)
+        assert result[0].listing_id == "lst-1"
+        assert result[0].slug == "my-env"
+
+
+class TestListPublicListings:
+    def test_with_query(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response([{"listing_id": "lst-pub", "title": "Public Env"}])
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_public_listings(query="coding", sort_by="popular")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/public/listings"
+        assert captured["params"]["query"] == "coding"
+        assert captured["params"]["sort_by"] == "popular"
+        assert result[0]["title"] == "Public Env"
+
+
+class TestSearchEnvironments:
+    def test_with_filters(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response([{"listing_id": "lst-1", "score": 0.95}])
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.search_environments(
+            query="math", domain="math", min_quality_score=0.8
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-search"
+        assert captured["body"]["query"] == "math"
+        assert captured["body"]["domain"] == "math"
+        assert captured["body"]["min_quality_score"] == 0.8
+        assert result[0]["score"] == 0.95
+
+
+class TestGetEnvironmentRelease:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                {
+                    "release_id": "rel-1",
+                    "listing_id": "lst-1",
+                    "release_version": "1.0.0",
+                    "protocol_version": "0.4.1",
+                    "status": "qualified",
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_environment_release("rel-1")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/environment-releases/rel-1"
+        assert isinstance(result, EnvironmentRelease)
+        assert result.release_version == "1.0.0"
+        assert result.status == "qualified"
+
+
+class TestCreateEnvironmentSession:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "session_id": "sess-1",
+                    "deployment_id": "dep-1",
+                    "task_id": "task-1",
+                    "status": "active",
+                    "session_token": "tok-abc",
+                    "observation": "Write fibonacci...",
+                },
+                status=202,
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_environment_session(
+            "dep-1", task_id="task-1", seed=42
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-deployments/dep-1/sessions"
+        assert captured["body"]["task_id"] == "task-1"
+        assert captured["body"]["seed"] == 42
+        assert isinstance(result, EnvironmentSession)
+        assert result.session_id == "sess-1"
+        assert result.session_token == "tok-abc"
+        assert result.observation == "Write fibonacci..."
+
+
+class TestGetEnvironmentSession:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                {
+                    "session_id": "sess-1",
+                    "deployment_id": "dep-1",
+                    "task_id": "task-1",
+                    "status": "completed",
+                    "reward": 1.0,
+                    "steps_taken": 5,
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_environment_session("sess-1")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/environment-sessions/sess-1"
+        assert isinstance(result, EnvironmentSession)
+        assert result.is_terminal is True
+        assert result.reward == 1.0
+
+
+class TestEnvironmentStep:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "observation": "2/3 tests pass",
+                    "reward": 0.67,
+                    "terminated": False,
+                    "truncated": False,
+                    "info": {"tests_passed": 2},
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.environment_step("sess-1", "def fib(n): ...")
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-sessions/sess-1/step"
+        assert captured["body"]["action"] == "def fib(n): ..."
+        assert isinstance(result, EnvironmentStepResult)
+        assert result.observation == "2/3 tests pass"
+        assert result.reward == 0.67
+        assert result.done is False
+
+
+class TestCancelEnvironmentSession:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response({"session_id": "sess-1", "status": "cancelled"})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.cancel_environment_session("sess-1")
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-sessions/sess-1/cancel"
+        assert result["status"] == "cancelled"
+
+
+class TestRefreshSessionToken:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                {
+                    "session_id": "sess-1",
+                    "session_token": "tok-new",
+                    "session_token_expires_at": "2026-06-01T02:00:00",
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.refresh_session_token("sess-1")
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-sessions/sess-1/token"
+        assert result["session_token"] == "tok-new"
+
+
+class TestRunEnvironmentEpisode:
+    def test_full_episode(self):
+        call_count = 0
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            path = req.url.path
+            if "/sessions" in path and req.method == "POST" and "/step" not in path and "/cancel" not in path:
+                return _json_response(
+                    {
+                        "session_id": "sess-ep",
+                        "deployment_id": "dep-1",
+                        "task_id": "task-1",
+                        "status": "active",
+                        "session_token": "tok-ep",
+                        "observation": "initial",
+                    },
+                    status=202,
+                )
+            elif "/step" in path:
+                return _json_response(
+                    {
+                        "observation": "done",
+                        "reward": 1.0,
+                        "terminated": True,
+                        "truncated": False,
+                    }
+                )
+            elif req.method == "GET":
+                return _json_response(
+                    {
+                        "session_id": "sess-ep",
+                        "deployment_id": "dep-1",
+                        "task_id": "task-1",
+                        "status": "completed",
+                        "reward": 1.0,
+                        "steps_taken": 1,
+                    }
+                )
+            return _json_response({}, 404)
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.run_environment_episode(
+            "dep-1",
+            task_id="task-1",
+            policy_fn=lambda obs, info: "my action",
+        )
+        assert isinstance(result, EnvironmentSession)
+        assert result.status == "completed"
+        assert result.reward == 1.0
+        assert call_count == 3
+
+
+class TestListEntitlements:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                [{"entitlement_id": "ent-1", "listing_id": "lst-1"}]
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_entitlements()
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/environment-entitlements"
+        assert result[0]["entitlement_id"] == "ent-1"
+
+
+class TestGrantEntitlement:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["body"] = json.loads(req.content)
+            return _json_response({"entitlement_id": "ent-new"}, status=201)
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.grant_entitlement(
+            grantee_tenant_id="tenant-buyer",
+            listing_id="lst-1",
+            license_id="lic-1",
+        )
+        assert captured["method"] == "POST"
+        assert captured["body"]["grantee_tenant_id"] == "tenant-buyer"
+        assert result["entitlement_id"] == "ent-new"
+
+
+class TestCreateEnvironmentExport:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"export_id": "exp-1", "status": "pending"}, status=202
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_environment_export(
+            deployment_id="dep-1", format="dpo"
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-exports"
+        assert captured["body"]["deployment_id"] == "dep-1"
+        assert captured["body"]["format"] == "dpo"
+        assert result["export_id"] == "exp-1"
+
+
+class TestCreateBatch:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"batch_id": "bat-1", "status": "pending"}, status=202
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_batch(
+            deployment_id="dep-1",
+            name="test batch",
+            task_seed_pairs=[{"task_id": "t1", "seed": 42}],
+        )
+        assert captured["method"] == "POST"
+        assert captured["body"]["name"] == "test batch"
+        assert len(captured["body"]["task_seed_pairs"]) == 1
+        assert result["batch_id"] == "bat-1"
+
+
+class TestCreateDispute:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"dispute_id": "disp-1", "status": "open"}, status=201
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_dispute(
+            session_id="sess-1",
+            deployment_id="dep-1",
+            release_id="rel-1",
+            dispute_type="reward_error",
+            summary="Reward was incorrect",
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-disputes"
+        assert captured["body"]["dispute_type"] == "reward_error"
+        assert result["dispute_id"] == "disp-1"
+
+
+class TestListQualityReports:
+    def test_with_filters(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response(
+                [{"report_id": "rpt-1", "status": "completed"}]
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_quality_reports(
+            release_id="rel-1", report_type="qualification"
+        )
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/environment-quality-reports"
+        assert captured["params"]["release_id"] == "rel-1"
+        assert captured["params"]["report_type"] == "qualification"
+        assert result[0]["report_id"] == "rpt-1"
+
+
+class TestListQualityBadges:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                [{"badge_id": "badge-1", "badge_type": "gold"}]
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_quality_badges(release_id="rel-1")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/environment-quality-badges"
+        assert result[0]["badge_type"] == "gold"
+
+
+class TestListSessionCharges:
+    def test_with_filter(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response(
+                [{"charge_id": "chg-1", "amount_cents": 100}]
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_session_charges(session_id="sess-1")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/environment-session-charges"
+        assert captured["params"]["session_id"] == "sess-1"
+        assert result[0]["amount_cents"] == 100
+
+
+class TestListInvoices:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                [{"invoice_id": "inv-1", "total_cents": 5000}]
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_invoices()
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/environment-invoices"
+        assert result[0]["total_cents"] == 5000
+
+
+class TestCreateReview:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response({"review_id": "rev-1"})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_review(
+            listing_id="lst-1",
+            listing_owner_tenant_id="tenant-creator",
+            rating=5,
+            title="Excellent environment",
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/reviews"
+        assert captured["body"]["rating"] == 5
+        assert result["review_id"] == "rev-1"
+
+
+class TestCreatePurchase:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response({"purchase_id": "pur-1", "status": "completed"})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_purchase(
+            listing_id="lst-1",
+            listing_owner_tenant_id="tenant-creator",
+            amount_cents=9900,
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/purchases"
+        assert captured["body"]["amount_cents"] == 9900
+        assert result["purchase_id"] == "pur-1"
+
+
+class TestCreateNamespace:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"namespace_id": "ns-1", "slug": "my-org"}, status=201
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_namespace(slug="my-org", display_name="My Org")
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-namespaces"
+        assert captured["body"]["slug"] == "my-org"
+        assert result["namespace_id"] == "ns-1"
+
+
+class TestCreateListing:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "listing_id": "lst-new",
+                    "namespace_id": "ns-1",
+                    "slug": "my-env",
+                    "title": "My Environment",
+                },
+                status=201,
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_listing(
+            namespace_id="ns-1", slug="my-env", title="My Environment"
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-listings"
+        assert isinstance(result, EnvironmentListing)
+        assert result.listing_id == "lst-new"
+
+
+class TestUpdateListing:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "listing_id": "lst-1",
+                    "namespace_id": "ns-1",
+                    "slug": "my-env",
+                    "title": "Updated Title",
+                    "visibility": "public",
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.update_listing(
+            "lst-1", expected_revision=2, title="Updated Title", visibility="public"
+        )
+        assert captured["method"] == "PATCH"
+        assert captured["path"] == "/v1/environment-listings/lst-1"
+        assert captured["body"]["expected_revision"] == 2
+        assert isinstance(result, EnvironmentListing)
+        assert result.title == "Updated Title"
+
+
+class TestCreateDeployment:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"deployment_id": "dep-1", "alias": "prod"}, status=201
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_deployment(
+            listing_id="lst-1",
+            alias="prod",
+            environment_release_id="rel-1",
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-deployments"
+        assert captured["body"]["alias"] == "prod"
+        assert result["deployment_id"] == "dep-1"
+
+
+class TestCreateEnvironmentRelease:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "release_id": "rel-new",
+                    "listing_id": "lst-1",
+                    "release_version": "1.0.0",
+                    "protocol_version": "0.4.1",
+                    "status": "quarantined",
+                },
+                status=201,
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_environment_release(
+            listing_id="lst-1",
+            release_version="1.0.0",
+            protocol_version="0.4.1",
+            runtime_ref="ghcr.io/my-org/env:1.0.0",
+            runtime_digest="sha256:" + "a" * 64,
+            task_pack_release_id="tp-1",
+            verifier_release_id="ver-1",
+            action_schema_digest="sha256:" + "b" * 64,
+            observation_schema_digest="sha256:" + "c" * 64,
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/environment-releases"
+        assert isinstance(result, EnvironmentRelease)
+        assert result.release_id == "rel-new"
+
+
+class TestGetCreatorAggregates:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response(
+                [{"release_id": "rel-1", "total_sessions": 150, "pass_rate": 0.82}]
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_creator_aggregates()
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/v1/environment-creator-aggregates"
+        assert result[0]["total_sessions"] == 150
+
+
+class TestCreatorProfile:
+    def test_create(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response({"profile_id": "prof-1", "display_name": "AI Labs"})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.create_creator_profile(
+            display_name="AI Labs", bio="We build RL environments"
+        )
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/creator-profiles"
+        assert captured["body"]["display_name"] == "AI Labs"
+        assert result["display_name"] == "AI Labs"
+
+    def test_get(self):
+        client = _make_client(
+            httpx.MockTransport(
+                lambda req: _json_response(
+                    {"profile_id": "prof-1", "display_name": "AI Labs"}
+                )
+            )
+        )
+        result = client.get_creator_profile()
+        assert result["display_name"] == "AI Labs"
+
+    def test_update(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["body"] = json.loads(req.content)
+            return _json_response({"profile_id": "prof-1", "is_public": True})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.update_creator_profile(is_public=True)
+        assert captured["method"] == "PATCH"
+        assert captured["body"]["is_public"] is True
+
+
+class TestCreatorSettlement:
+    def test_get_account(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["path"] = req.url.path
+            return _json_response({"balance_cents": 15000, "currency": "usd"})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_creator_account()
+        assert captured["path"] == "/v1/creator-account"
+        assert result["balance_cents"] == 15000
+
+    def test_list_royalty_rules(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["path"] = req.url.path
+            return _json_response([{"rule_id": "rule-1", "type": "per_session"}])
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_royalty_rules()
+        assert captured["path"] == "/v1/creator-royalty-rules"
+        assert result[0]["type"] == "per_session"
+
+    def test_list_accruals(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["path"] = req.url.path
+            return _json_response([{"accrual_id": "acc-1", "amount_cents": 500}])
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_accruals(status="pending")
+        assert captured["path"] == "/v1/creator-accruals"
+        assert result[0]["amount_cents"] == 500
+
+
+class TestListAdapters:
+    def test_with_filter(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response(
+                [{"adapter_id": "adp-1", "protocol_family": "gymnasium"}]
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.list_adapters(protocol_family="gymnasium")
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/adapters"
+        assert captured["params"]["protocol_family"] == "gymnasium"
+        assert result[0]["adapter_id"] == "adp-1"
+
+
+class TestGetAdapter:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["path"] = req.url.path
+            return _json_response(
+                {"adapter_id": "adp-1", "name": "Gymnasium Adapter"}
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.get_adapter("adp-1")
+        assert captured["path"] == "/adapters/adp-1"
+        assert result["name"] == "Gymnasium Adapter"
+
+
+class TestCheckAdapterEquivalence:
+    def test_basic(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["path"] = req.url.path
+            captured["params"] = dict(req.url.params)
+            return _json_response({"equivalent": True, "diff_count": 0})
+
+        client = _make_client(httpx.MockTransport(capture))
+        result = client.check_adapter_equivalence("adp-1", "ver-1")
+        assert captured["path"] == "/adapters/adp-1/equivalence/check"
+        assert captured["params"]["version_id"] == "ver-1"
+        assert result["equivalent"] is True
+
+
+class TestRevokeEntitlement:
+    def test_path_and_method(self):
+        captured = {}
+
+        def handler(req):
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response({"entitlement_id": "ent-1", "status": "revoked"})
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.revoke_entitlement("ent-1")
+        assert captured["method"] == "POST"
+        assert "/ent-1/revoke" in captured["path"]
+        assert result["status"] == "revoked"
+
+
+class TestGetEnvironmentExport:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response({"export_id": "exp-1", "status": "completed"})
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_environment_export("exp-1")
+        assert "/v1/environment-exports/exp-1" in captured["path"]
+        assert result["export_id"] == "exp-1"
+
+
+class TestGetBatch:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response(
+                {"batch_id": "bat-1", "status": "running", "progress": 50}
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_batch("bat-1")
+        assert "/v1/environment-batches/bat-1" in captured["path"]
+        assert result["progress"] == 50
+
+
+class TestGetBatchSessions:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response([{"session_id": "s1"}, {"session_id": "s2"}])
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_batch_sessions("bat-1")
+        assert "/bat-1/sessions" in captured["path"]
+        assert len(result) == 2
+
+
+class TestCancelBatch:
+    def test_path_and_method(self):
+        captured = {}
+
+        def handler(req):
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response({"batch_id": "bat-1", "status": "cancelled"})
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.cancel_batch("bat-1")
+        assert captured["method"] == "POST"
+        assert "/bat-1/cancel" in captured["path"]
+        assert result["status"] == "cancelled"
+
+
+class TestGetBatchComparison:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response({"comparison": {"mean_reward": 0.72}})
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_batch_comparison("bat-1")
+        assert "/bat-1/comparison" in captured["path"]
+
+
+class TestGetDispute:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response({"dispute_id": "dis-1", "status": "open"})
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_dispute("dis-1")
+        assert "/v1/environment-disputes/dis-1" in captured["path"]
+        assert result["status"] == "open"
+
+
+class TestGetSessionAudit:
+    def test_path_and_params(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"event": "step", "ts": "2026-01-01T00:00:00"}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_session_audit("sess-1", event_type="step", limit=10)
+        assert "/sess-1/audit" in captured["path"]
+        assert "event_type=step" in captured["query"]
+        assert len(result) == 1
+
+
+class TestGetQualityReport:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response(
+                {"report_id": "rpt-1", "status": "completed"}
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_quality_report("rpt-1")
+        assert "/v1/environment-quality-reports/rpt-1" in captured["path"]
+
+
+class TestGetQualityChecks:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response(
+                [{"check_id": "chk-1", "passed": True}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_quality_checks("rpt-1")
+        assert "/rpt-1/checks" in captured["path"]
+        assert result[0]["passed"] is True
+
+
+class TestListContaminationFindings:
+    def test_path_and_filters(self):
+        captured = {}
+
+        def handler(req):
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"finding_id": "f1", "finding_type": "data_leak"}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_contamination_findings(
+            release_id="rel-1", finding_type="data_leak"
+        )
+        assert "release_id=rel-1" in captured["query"]
+        assert "finding_type=data_leak" in captured["query"]
+        assert len(result) == 1
+
+
+class TestListBenchmarkResults:
+    def test_path_and_filters(self):
+        captured = {}
+
+        def handler(req):
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"model_tag": "gpt-4", "score": 0.85}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_benchmark_results(
+            release_id="rel-1", model_tag="gpt-4"
+        )
+        assert "model_tag=gpt-4" in captured["query"]
+        assert result[0]["score"] == 0.85
+
+
+class TestListLicenseVersions:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"license_version_id": "lv-1", "license_id": "apache-2.0"}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_license_versions("rel-1")
+        assert "release_id=rel-1" in captured["query"]
+        assert result[0]["license_id"] == "apache-2.0"
+
+
+class TestGetLicenseVersion:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response(
+                {"license_version_id": "lv-1", "text": "Apache License..."}
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_license_version("lv-1")
+        assert "/lv-1" in captured["path"]
+
+
+class TestListChargeAdjustments:
+    def test_path_and_filter(self):
+        captured = {}
+
+        def handler(req):
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"adjustment_id": "adj-1", "type": "refund"}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_charge_adjustments(charge_id="chg-1")
+        assert "charge_id=chg-1" in captured["query"]
+
+
+class TestGetInvoice:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response(
+                {"invoice_id": "inv-1", "total_cents": 5000}
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_invoice("inv-1")
+        assert "/inv-1" in captured["path"]
+        assert result["total_cents"] == 5000
+
+
+class TestGetInvoiceLineItems:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response(
+                [{"line_item_id": "li-1", "amount_cents": 1500}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_invoice_line_items("inv-1")
+        assert "/inv-1/line-items" in captured["path"]
+
+
+class TestGetChargeSummary:
+    def test_with_date_params(self):
+        captured = {}
+
+        def handler(req):
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                {"total_cents": 10000, "session_count": 42}
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_charge_summary(
+            since="2026-01-01", until="2026-06-30"
+        )
+        assert "since=2026-01-01" in captured["query"]
+        assert "until=2026-06-30" in captured["query"]
+        assert result["session_count"] == 42
+
+
+class TestListNotifications:
+    def test_unread_filter(self):
+        captured = {}
+
+        def handler(req):
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"notification_id": "n1", "type": "new_review", "read": False}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_notifications(unread_only=True)
+        assert "unread_only=true" in captured["query"]
+        assert len(result) == 1
+
+
+class TestMarkNotificationRead:
+    def test_path_and_method(self):
+        captured = {}
+
+        def handler(req):
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            return _json_response({"notification_id": "n1", "read": True})
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.mark_notification_read("n1")
+        assert captured["method"] == "POST"
+        assert "/n1/read" in captured["path"]
+
+
+class TestCreateDeploymentRevision:
+    def test_path_and_body(self):
+        captured = {}
+
+        def handler(req):
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"deployment_id": "dep-1", "alias": "production"}, status=201
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.create_deployment_revision(
+            "dep-1",
+            environment_release_id="rel-2",
+            export_policy="full",
+        )
+        assert captured["method"] == "POST"
+        assert "/dep-1/revisions" in captured["path"]
+        assert captured["body"]["environment_release_id"] == "rel-2"
+        assert captured["body"]["export_policy"] == "full"
+
+
+class TestCreateQualityReport:
+    def test_path_and_body(self):
+        captured = {}
+
+        def handler(req):
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"report_id": "rpt-1", "status": "pending"}, status=202
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.create_quality_report(
+            release_id="rel-1",
+            report_type="qualification",
+            deployment_id="dep-1",
+        )
+        assert captured["body"]["release_id"] == "rel-1"
+        assert captured["body"]["report_type"] == "qualification"
+        assert captured["body"]["deployment_id"] == "dep-1"
+
+
+class TestCreateTaskPackRelease:
+    def test_path_and_body(self):
+        captured = {}
+
+        def handler(req):
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response({"release_id": "tp-1"}, status=201)
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.create_task_pack_release(
+            namespace_id="ns-1",
+            name="my-tasks",
+            release_version="1.0.0",
+            artifact_ref="ghcr.io/tasks:1.0",
+            artifact_digest="sha256:aaa",
+            usage_policy="open",
+            license_id="apache-2.0",
+            members=[{"task_id": "t1"}],
+        )
+        assert captured["method"] == "POST"
+        assert "/v1/task-pack-releases" in captured["path"]
+        assert captured["body"]["name"] == "my-tasks"
+        assert captured["body"]["members"] == [{"task_id": "t1"}]
+        assert result["release_id"] == "tp-1"
+
+
+class TestCreateVerifierRelease:
+    def test_path_and_body(self):
+        captured = {}
+
+        def handler(req):
+            captured["body"] = json.loads(req.content)
+            return _json_response({"release_id": "ver-1"}, status=201)
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.create_verifier_release(
+            namespace_id="ns-1",
+            name="my-verifier",
+            release_version="1.0.0",
+            runtime_ref="ghcr.io/ver:1.0",
+            runtime_digest="sha256:bbb",
+            source_digest="sha256:src",
+            evidence_schema_digest="sha256:evi",
+            reward_mode="continuous",
+            reward_min=0.0,
+            reward_max=1.0,
+            timeout_seconds=30,
+            nondeterministic=True,
+        )
+        assert captured["body"]["reward_mode"] == "continuous"
+        assert captured["body"]["reward_min"] == 0.0
+        assert captured["body"]["reward_max"] == 1.0
+        assert captured["body"]["timeout_seconds"] == 30
+        assert captured["body"]["nondeterministic"] is True
+        assert result["release_id"] == "ver-1"
+
+
+class TestUpdateCreatorProfile:
+    def test_patch_method_and_body(self):
+        captured = {}
+
+        def handler(req):
+            captured["method"] = req.method
+            captured["body"] = json.loads(req.content)
+            return _json_response({"display_name": "Updated Name", "is_public": True})
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.update_creator_profile(
+            display_name="Updated Name",
+            bio="New bio",
+            is_public=True,
+        )
+        assert captured["method"] == "PATCH"
+        assert captured["body"]["display_name"] == "Updated Name"
+        assert captured["body"]["is_public"] is True
+        assert result["display_name"] == "Updated Name"
+
+
+class TestCreateChangelog:
+    def test_body_and_optional_fields(self):
+        captured = {}
+
+        def handler(req):
+            captured["body"] = json.loads(req.content)
+            return _json_response({"changelog_id": "cl-1"}, status=201)
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.create_changelog(
+            release_id="rel-1",
+            version_label="1.2.0",
+            summary="Added new tasks",
+            body="Full details here",
+            breaking_changes=True,
+            notify_buyers=True,
+            listing_id="lst-1",
+        )
+        assert captured["body"]["release_id"] == "rel-1"
+        assert captured["body"]["version_label"] == "1.2.0"
+        assert captured["body"]["breaking_changes"] is True
+        assert captured["body"]["notify_buyers"] is True
+        assert captured["body"]["listing_id"] == "lst-1"
+
+
+class TestListChangelogs:
+    def test_path_and_params(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"changelog_id": "cl-1", "summary": "v1.2.0"}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_changelogs("rel-1", limit=10)
+        assert "/rel-1" in captured["path"]
+        assert "limit=10" in captured["query"]
+
+
+class TestGetCreatorAccount:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response(
+                {"balance_cents": 15000, "status": "active"}
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_creator_account()
+        assert "/v1/creator-account" in captured["path"]
+        assert result["balance_cents"] == 15000
+
+
+class TestListRoyaltyRules:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response(
+                [{"rule_id": "rr-1", "rate_bps": 2000}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_royalty_rules()
+        assert "/v1/creator-royalty-rules" in captured["path"]
+
+
+class TestListSettlementAdjustments:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response([{"adjustment_id": "adj-1"}])
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_settlement_adjustments()
+        assert "/v1/creator-adjustments" in captured["path"]
+
+
+class TestListPayoutBatches:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response([{"payout_id": "po-1", "status": "completed"}])
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_payout_batches()
+        assert "/v1/creator-payout-batches" in captured["path"]
+
+
+class TestListCreatorStatements:
+    def test_path(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            return _json_response(
+                [{"statement_id": "stmt-1", "period": "2026-06"}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_creator_statements()
+        assert "/v1/creator-statements" in captured["path"]
+
+
+class TestListAdapterVersions:
+    def test_path_and_filter(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"version_id": "v1", "status": "active"}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_adapter_versions("adp-1", status="active")
+        assert "/adp-1/versions" in captured["path"]
+        assert "status=active" in captured["query"]
+
+
+class TestGetAdapterConformance:
+    def test_path_and_params(self):
+        captured = {}
+
+        def handler(req):
+            captured["path"] = req.url.path
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"test_id": "ct-1", "passed": True}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.get_adapter_conformance(
+            "adp-1", version_id="v1", status="passed"
+        )
+        assert "/adp-1/conformance" in captured["path"]
+        assert "version_id=v1" in captured["query"]
+        assert result[0]["passed"] is True
+
+
+class TestReportAdapterUsage:
+    def test_body(self):
+        captured = {}
+
+        def handler(req):
+            captured["method"] = req.method
+            captured["body"] = json.loads(req.content)
+            return _json_response({"ok": True})
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.report_adapter_usage(
+            "adp-1",
+            version_id="v1",
+            event_type="session_start",
+            metadata={"env": "test"},
+        )
+        assert captured["method"] == "POST"
+        assert captured["body"]["version_id"] == "v1"
+        assert captured["body"]["event_type"] == "session_start"
+        assert captured["body"]["metadata"] == {"env": "test"}
+
+
+class TestListBatches:
+    def test_filters(self):
+        captured = {}
+
+        def handler(req):
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"batch_id": "bat-1"}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_batches(deployment_id="dep-1", status="completed")
+        assert "deployment_id=dep-1" in captured["query"]
+        assert "status=completed" in captured["query"]
+
+
+class TestListDisputesFilters:
+    def test_filters(self):
+        captured = {}
+
+        def handler(req):
+            captured["query"] = str(req.url.query)
+            return _json_response([{"dispute_id": "dis-1"}])
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_disputes(release_id="rel-1", status="open")
+        assert "release_id=rel-1" in captured["query"]
+        assert "status=open" in captured["query"]
+
+
+class TestRequestPublish:
+    def test_path_and_body(self):
+        captured = {}
+
+        def handler(req):
+            captured["method"] = req.method
+            captured["path"] = req.url.path
+            captured["body"] = json.loads(req.content)
+            return _json_response({"request_id": "pr-1", "status": "pending"})
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.request_publish("lst-1")
+        assert captured["method"] == "POST"
+        assert "/moderation/publish-request" in captured["path"]
+        assert captured["body"]["listing_id"] == "lst-1"
+
+
+class TestListAccruals:
+    def test_with_status_filter(self):
+        captured = {}
+
+        def handler(req):
+            captured["query"] = str(req.url.query)
+            return _json_response(
+                [{"accrual_id": "acc-1", "status": "pending"}]
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.list_accruals(status="pending")
+        assert "status=pending" in captured["query"]
+
+
+class TestAllMarketplacePathsUseV1OrKnownPrefix:
+    """Smoke test: all marketplace endpoint paths must use /v1/ or a known non-versioned prefix."""
+
+    KNOWN_PREFIXES = (
+        "/v1/",
+        "/public/",
+        "/reviews",
+        "/purchases",
+        "/notifications",
+        "/creator-profiles",
+        "/moderation/",
+        "/changelogs",
+        "/vulnerabilities",
+        "/adapters",
+    )
+
+    def test_all_paths_are_valid(self):
+        captured_paths = []
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured_paths.append(req.url.path)
+            return _json_response(
+                {
+                    "listing_id": "x",
+                    "namespace_id": "x",
+                    "slug": "x",
+                    "title": "x",
+                    "release_id": "x",
+                    "release_version": "x",
+                    "protocol_version": "x",
+                    "session_id": "x",
+                    "deployment_id": "x",
+                    "task_id": "x",
+                    "status": "active",
+                    "observation": "",
+                    "reward": None,
+                    "terminated": False,
+                    "truncated": False,
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+
+        client.list_environment_listings()
+        client.list_public_listings()
+        client.search_environments()
+        client.get_environment_release("r1")
+        client.create_environment_session("d1", task_id="t1")
+        client.get_environment_session("s1")
+        client.environment_step("s1", "act")
+        client.cancel_environment_session("s1")
+        client.refresh_session_token("s1")
+        client.list_entitlements()
+        client.grant_entitlement(
+            grantee_tenant_id="t", listing_id="l", license_id="lic"
+        )
+        client.create_environment_export(deployment_id="d", format="dpo")
+        client.list_environment_exports()
+        client.create_batch(
+            deployment_id="d",
+            name="b",
+            task_seed_pairs=[{"task_id": "t1"}],
+        )
+        client.list_batches()
+        client.create_dispute(
+            session_id="s",
+            deployment_id="d",
+            release_id="r",
+            dispute_type="t",
+            summary="s",
+        )
+        client.list_disputes()
+        client.list_quality_reports()
+        client.list_quality_badges()
+        client.list_session_charges()
+        client.list_invoices()
+        client.create_review(
+            listing_id="l",
+            listing_owner_tenant_id="t",
+            rating=5,
+            title="great",
+        )
+        client.list_reviews("l1")
+        client.create_purchase(
+            listing_id="l",
+            listing_owner_tenant_id="t",
+            amount_cents=100,
+        )
+        client.list_purchases()
+        client.create_namespace(slug="ns", display_name="NS")
+        client.create_listing(namespace_id="ns", slug="s", title="T")
+        client.create_deployment(
+            listing_id="l", alias="a", environment_release_id="r"
+        )
+        client.get_creator_aggregates()
+        client.create_creator_profile(display_name="N")
+        client.get_creator_profile()
+        client.request_publish("l1")
+        client.get_creator_account()
+        client.list_royalty_rules()
+        client.list_accruals()
+        client.list_adapters()
+        client.get_adapter("a1")
+
+        for path in captured_paths:
+            assert any(
+                path.startswith(p) for p in self.KNOWN_PREFIXES
+            ), f"Unexpected path prefix: {path}"

@@ -555,3 +555,203 @@ class RLTrajectory:
             steps_taken=data.get("steps_taken", 0),
             steps=data.get("steps", []),
         )
+
+
+# ── Environment Hub & Marketplace ────────────────────────────────────
+
+
+@dataclass
+class EnvironmentListing:
+    """A listed environment available through the marketplace.
+
+    Attributes:
+        listing_id: Unique listing identifier.
+        namespace_id: Owning namespace identifier.
+        slug: URL-safe listing slug.
+        title: Human-readable title.
+        summary: Short description.
+        visibility: ``private``, ``unlisted``, or ``public``.
+        moderation_state: ``pending``, ``approved``, or ``suspended``.
+        recommended_release_id: Currently recommended release, if any.
+        created_at: ISO-8601 creation timestamp.
+        updated_at: ISO-8601 last-update timestamp.
+    """
+
+    listing_id: str
+    namespace_id: str
+    slug: str
+    title: str
+    summary: str = ""
+    visibility: str = "private"
+    moderation_state: str = "pending"
+    recommended_release_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EnvironmentListing":
+        return cls(
+            listing_id=str(data["listing_id"]),
+            namespace_id=str(data.get("namespace_id", "")),
+            slug=data.get("slug", ""),
+            title=data.get("title", ""),
+            summary=data.get("summary", ""),
+            visibility=data.get("visibility", "private"),
+            moderation_state=data.get("moderation_state", "pending"),
+            recommended_release_id=_opt_str(data.get("recommended_release_id")),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+        )
+
+
+@dataclass
+class EnvironmentSession:
+    """A hosted environment session for running episodes.
+
+    Attributes:
+        session_id: Unique session identifier.
+        deployment_id: Deployment this session runs on.
+        task_id: Task being executed.
+        status: ``provisioning``, ``active``, ``completed``, ``failed``,
+            ``cancelled``, or ``truncated``.
+        session_token: Bearer token for step requests (only on create).
+        session_token_expires_at: Token expiry timestamp.
+        observation: Current observation (available after provisioning).
+        reward: Cumulative reward so far.
+        steps_taken: Number of steps completed.
+        seed: Reproducibility seed, if provided.
+        created_at: ISO-8601 creation timestamp.
+    """
+
+    session_id: str
+    deployment_id: str
+    task_id: str
+    status: str
+    session_token: Optional[str] = None
+    session_token_expires_at: Optional[str] = None
+    observation: Optional[str] = None
+    reward: Optional[float] = None
+    steps_taken: int = 0
+    seed: Optional[int] = None
+    created_at: Optional[str] = None
+
+    @property
+    def is_active(self) -> bool:
+        """Whether the session is ready for stepping."""
+        return self.status == "active"
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether the session has ended."""
+        return self.status in ("completed", "failed", "cancelled", "truncated")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EnvironmentSession":
+        return cls(
+            session_id=str(data["session_id"]),
+            deployment_id=str(data.get("deployment_id", "")),
+            task_id=data.get("task_id", ""),
+            status=data.get("status", "provisioning"),
+            session_token=data.get("session_token"),
+            session_token_expires_at=data.get("session_token_expires_at"),
+            observation=data.get("observation"),
+            reward=data.get("reward"),
+            steps_taken=data.get("steps_taken", 0),
+            seed=data.get("seed"),
+            created_at=data.get("created_at"),
+        )
+
+
+@dataclass
+class EnvironmentStepResult:
+    """Result of taking an action in a hosted environment session.
+
+    Attributes:
+        observation: Observation after the action.
+        reward: Reward for this step (``None`` for dense-off intermediate steps).
+        terminated: Episode ended naturally (goal reached, game over).
+        truncated: Episode was cut short (max steps, timeout).
+        info: Additional step metadata.
+    """
+
+    observation: str
+    reward: Optional[float]
+    terminated: bool
+    truncated: bool
+    info: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def done(self) -> bool:
+        """True if the episode is over (terminated or truncated)."""
+        return self.terminated or self.truncated
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, **kwargs: Any) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EnvironmentStepResult":
+        return cls(
+            observation=data.get("observation", ""),
+            reward=data.get("reward"),
+            terminated=data.get("terminated", False),
+            truncated=data.get("truncated", False),
+            info=data.get("info", {}),
+        )
+
+
+@dataclass
+class EnvironmentRelease:
+    """An immutable, content-addressed environment release.
+
+    Attributes:
+        release_id: Unique release identifier.
+        listing_id: Parent listing.
+        release_version: Semantic version string.
+        protocol_version: Protocol version (e.g. ``0.4.1``).
+        status: ``quarantined``, ``qualified``, or ``revoked``.
+        content_digest: Content-addressed SHA-256 digest.
+        created_at: ISO-8601 creation timestamp.
+    """
+
+    release_id: str
+    listing_id: str
+    release_version: str
+    protocol_version: str
+    status: str = "quarantined"
+    content_digest: Optional[str] = None
+    created_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EnvironmentRelease":
+        return cls(
+            release_id=str(data["release_id"]),
+            listing_id=str(data.get("listing_id", "")),
+            release_version=data.get("release_version", ""),
+            protocol_version=data.get("protocol_version", ""),
+            status=data.get("status", "quarantined"),
+            content_digest=data.get("content_digest"),
+            created_at=data.get("created_at"),
+        )
+
+
+def _opt_str(val: Any) -> Optional[str]:
+    """Convert a value to str or None."""
+    return str(val) if val is not None else None
