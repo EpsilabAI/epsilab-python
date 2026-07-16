@@ -558,11 +558,20 @@ def _resolve_namespace(client: EpsilabClient, directory: Path, *, auto: bool = F
     if explicit_id:
         return explicit_id
 
-    listings = client.list_environment_listings(limit=100)
     ns_map: dict[str, str] = {}
+    listings = client.list_environment_listings(limit=100)
     for li in listings:
         if li.namespace_id and li.namespace_id not in ns_map:
             ns_map[li.namespace_id] = li.namespace or li.namespace_id[:12]
+    try:
+        tools = client.list_application_tools(limit=100)
+        for t in tools:
+            ns_id = getattr(t, "namespace_id", None)
+            ns_slug = getattr(t, "namespace", None)
+            if ns_id and ns_id not in ns_map:
+                ns_map[ns_id] = ns_slug or ns_id[:12]
+    except Exception:
+        pass
 
     if len(ns_map) == 1:
         ns_id = next(iter(ns_map))
@@ -591,10 +600,29 @@ def _create_namespace(client: EpsilabClient, directory: Path, *, auto: bool = Fa
     else:
         slug = text("Namespace slug", default=default_slug)
         display_name = text("Display name", default=slug.replace("-", " ").title())
-    ns = client.create_namespace(slug=slug, display_name=display_name)
-    namespace_id = str(ns.get("namespace_id", ns.get("id")))
-    _ok(f"  Created namespace: {slug}")
-    return namespace_id
+    try:
+        ns = client.create_namespace(slug=slug, display_name=display_name)
+        namespace_id = str(ns.get("namespace_id", ns.get("id")))
+        _ok(f"  Created namespace: {slug}")
+        return namespace_id
+    except ApiError as e:
+        if e.status_code == 409:
+            for li in client.list_environment_listings(limit=100):
+                if li.namespace and li.namespace == slug:
+                    _ok(f"  Using namespace: {slug}")
+                    return li.namespace_id
+            try:
+                for t in client.list_application_tools(limit=100):
+                    ns_slug = getattr(t, "namespace", None)
+                    ns_id = getattr(t, "namespace_id", None)
+                    if ns_slug == slug and ns_id:
+                        _ok(f"  Using namespace: {slug}")
+                        return ns_id
+            except Exception:
+                pass
+            _err(f"Namespace '{slug}' already exists but could not be resolved.\n"
+                 "  Pass --namespace-id explicitly.")
+        raise
 
 
 def _resolve_listing(client: EpsilabClient, namespace_id: str, slug: str, title: str, summary: str) -> Any:
@@ -874,13 +902,16 @@ def _deploy_environment(
 
     registry = args.registry or os.environ.get("EPSILAB_REGISTRY", "")
     if not registry:
-        if is_interactive() and not args.yes:
-            registry = text("Container registry")
-        else:
-            _err(
-                "No container registry configured.\n"
-                "  Set EPSILAB_REGISTRY or pass --registry."
-            )
+        try:
+            config = client.get_platform_config()
+            registry = config.get("container_registry", "")
+        except Exception:
+            pass
+    if not registry:
+        _err(
+            "Could not determine container registry.\n"
+            "  Set EPSILAB_REGISTRY or pass --registry."
+        )
     version = args.version or "0.1.0"
     if is_interactive() and not args.yes and not args.version:
         version = text("Version", default=version)
@@ -2768,7 +2799,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     deploy_p.add_argument("directory", nargs="?", default=".", help="Environment directory (default: .)")
-    deploy_p.add_argument("--registry", help="Container registry (default: $EPSILAB_REGISTRY)")
+    deploy_p.add_argument("--registry", help="Container registry override (auto-detected from platform)")
     deploy_p.add_argument("--version", help="Release version (default: 0.1.0)")
     deploy_p.add_argument("--namespace-id", help="Namespace ID (skips namespace selection)")
     deploy_p.add_argument("--prod", action="store_true", help="Deploy for hosted execution after pushing")

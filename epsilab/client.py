@@ -3394,6 +3394,12 @@ class EpsilabClient:
             f"/v1/notifications/{self._path_segment(notification_id)}/read",
         )
 
+    # ── Platform config ────────────────────────────────────────────────
+
+    def get_platform_config(self) -> Dict[str, Any]:
+        """Fetch platform configuration (container registry, API version, etc.)."""
+        return self._request("GET", "/v1/platform/config")
+
     # ── Creator: registry & publishing ───────────────────────────────
 
     def create_namespace(
