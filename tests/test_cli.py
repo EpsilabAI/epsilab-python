@@ -165,14 +165,14 @@ class TestEnvInit:
         args.directory = str(target)
         cmd_env_init(args)
 
-        assert (target / "epsilab.json").exists()
+        assert (target / "tasks.json").exists()
         assert (target / "Dockerfile").exists()
         assert (target / "server.py").exists()
         assert (target / "requirements.txt").exists()
 
-        manifest = json.loads((target / "epsilab.json").read_text())
-        assert manifest["task_pack"]["name"] == "test-env-tasks"
-        assert manifest["verifier"]["name"] == "test-env-verifier"
+        tasks = json.loads((target / "tasks.json").read_text())
+        assert isinstance(tasks, list)
+        assert tasks[0]["task_id"] == "test-env-001"
 
     def test_refuses_nonempty_dir(self, tmp_path):
         target = tmp_path / "existing"
@@ -1076,8 +1076,9 @@ class TestEnvInitDefaultSlug:
         args.directory = str(target)
         cmd_env_init(args)
 
-        manifest = json.loads((target / "epsilab.json").read_text())
-        assert manifest["task_pack"]["name"] == "my-environment-tasks"
+        tasks = json.loads((target / "tasks.json").read_text())
+        assert isinstance(tasks, list)
+        assert tasks[0]["task_id"] == "my-environment-001"
 
     def test_server_py_is_valid_python(self, tmp_path):
         target = tmp_path / "valid-env"
@@ -1088,17 +1089,17 @@ class TestEnvInitDefaultSlug:
         server_code = (target / "server.py").read_text()
         compile(server_code, "server.py", "exec")
 
-    def test_manifest_is_valid_json(self, tmp_path):
+    def test_tasks_json_is_valid(self, tmp_path):
         target = tmp_path / "json-env"
         args = build_parser().parse_args(["env", "init", "json-env"])
         args.directory = str(target)
         cmd_env_init(args)
 
-        manifest = json.loads((target / "epsilab.json").read_text())
-        assert "task_pack" in manifest
-        assert "verifier" in manifest
-        assert "environment" in manifest
-        assert manifest["release_version"] == "0.1.0"
+        tasks = json.loads((target / "tasks.json").read_text())
+        assert isinstance(tasks, list)
+        assert len(tasks) >= 1
+        assert "task_id" in tasks[0]
+        assert "prompt" in tasks[0]
 
 
 class TestEnvVerify:
@@ -1113,19 +1114,17 @@ class TestEnvVerify:
         out = capsys.readouterr().out
         assert "server.py exists" in out
         assert "Dockerfile exists" in out
-        assert "Manifest is valid JSON" in out
         assert "/reset" in out
         assert "/step" in out
 
-    def test_verify_missing_manifest(self, tmp_path, capsys):
+    def test_verify_no_manifest_passes(self, tmp_path, capsys):
         target = tmp_path / "empty-env"
         target.mkdir()
 
         verify_args = build_parser().parse_args(["env", "verify", "-d", str(target)])
-        with pytest.raises(SystemExit):
-            cmd_env_verify(verify_args)
+        cmd_env_verify(verify_args)
         out = capsys.readouterr().out
-        assert "Manifest not found" in out
+        assert "not required" in out or "passed" in out.lower()
 
     def test_verify_invalid_digest(self, tmp_path, capsys):
         target = tmp_path / "bad-digest"

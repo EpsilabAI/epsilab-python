@@ -1,6 +1,11 @@
-# Model Evaluations, Voice, Routing, and Capability Matrix
+# Model Evaluations, Voice, Routing, and Capability Matrix (Deprecated)
 
-The SDK includes methods for model evaluation, voice evaluation, intelligent routing, and capability matrix analysis. These features are fully functional but are not the current primary focus.
+> **Deprecated**: These features are deprecated as of v0.15.0. The platform
+> is focused on the **RL Environment Hub** for post-training workflows.
+> These endpoints will remain functional until 2026-12-31 but will not
+> receive new features. See [`examples/run_environment.py`](../examples/run_environment.py)
+> and [`examples/grpo_training.py`](../examples/grpo_training.py) for
+> the recommended approach.
 
 ## Model Evaluations
 

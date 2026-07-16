@@ -166,14 +166,21 @@ except ApiError as e:
 
 The SDK retries automatically on rate limits (429) and transient server errors (500, 502, 503, 504) with exponential backoff and jitter.
 
+## Examples
+
+| Script | Description |
+|--------|-------------|
+| [`examples/run_environment.py`](examples/run_environment.py) | Browse, run sessions, inspect trajectories, export data |
+| [`examples/grpo_training.py`](examples/grpo_training.py) | Use environments as live reward functions for TRL GRPO |
+| [`examples/batch_evaluation.py`](examples/batch_evaluation.py) | Batch evaluation across tasks with server-side parallelism |
+| [`examples/marketplace_example.py`](examples/marketplace_example.py) | Creator and buyer marketplace workflows |
+
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
 | [API Reference](docs/api-reference.md) | Full method reference for all SDK features |
 | [Evaluations & More](docs/evaluations.md) | Model evaluations, voice, routing, capability matrix |
-| [`examples/marketplace_example.py`](examples/marketplace_example.py) | Marketplace workflows for both sides |
-| [`examples/example.py`](examples/example.py) | Evaluation, export, and RL workflow |
 
 ## License
 

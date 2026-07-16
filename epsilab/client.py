@@ -233,6 +233,27 @@ class EpsilabClient:
             return last_resp
         raise ApiError(0, str(last_error) if last_error else "Request failed")
 
+    _deprecation_warned: set = set()
+
+    def _check_deprecation(self, resp: httpx.Response, path: str) -> None:
+        """Emit a one-time warning if the server signals deprecation."""
+        if resp.headers.get("Deprecation") != "true":
+            return
+        key = path.split("?")[0]
+        if key in self._deprecation_warned:
+            return
+        self._deprecation_warned.add(key)
+        import warnings
+
+        sunset = resp.headers.get("Sunset", "soon")
+        warnings.warn(
+            f"Epsilab API endpoint '{key}' is deprecated and will be "
+            f"removed after {sunset}. Migrate to the RL Environment Hub. "
+            f"See https://docs.epsilab.com/migration/environments",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+
     def _check_response_errors(self, resp: httpx.Response) -> None:
         """Raise appropriate exceptions for error HTTP status codes."""
         if resp.status_code in (401, 403):
@@ -272,6 +293,7 @@ class EpsilabClient:
         _request_logger.debug(
             "%s %s -> %d (%dms)", method, path, resp.status_code, elapsed_ms
         )
+        self._check_deprecation(resp, path)
         self._check_response_errors(resp)
         if resp.status_code == 204:
             return None
@@ -286,6 +308,7 @@ class EpsilabClient:
     ) -> str:
         """Like _request but returns raw response text (for NDJSON/exports)."""
         resp = self._buffered_request_with_retry(method, path, params=params)
+        self._check_deprecation(resp, path)
         self._check_response_errors(resp)
         return resp.text
 
@@ -382,7 +405,7 @@ class EpsilabClient:
             params={"search": search, "provider": provider, "limit": limit},
         )
 
-    # ── runs ─────────────────────────────────────────────────────────
+    # ── runs (deprecated — use RL environments) ────────────────────
 
     def create_run(
         self,
@@ -396,8 +419,15 @@ class EpsilabClient:
     ) -> RunSummary:
         """Submit a single model for evaluation.
 
-        For multi-model evaluations, use :meth:`create_evaluation` instead.
+        .. deprecated::
+            Use RL environments instead. See ``examples/run_environment.py``.
         """
+        import warnings
+        warnings.warn(
+            "create_run() is deprecated. Use RL environments instead. "
+            "See examples/run_environment.py",
+            DeprecationWarning, stacklevel=2,
+        )
         body: Dict[str, Any] = {"target_model": model_name}
         if base_url:
             target_config: Dict[str, str] = {"base_url": base_url}
@@ -530,7 +560,7 @@ class EpsilabClient:
                 raise TimeoutError(f"Run {run_id} did not complete within {timeout}s")
             time.sleep(poll_interval)
 
-    # ── multi-model evaluations ──────────────────────────────────────
+    # ── multi-model evaluations (deprecated — use RL environments) ──
 
     def create_evaluation(
         self,
@@ -545,6 +575,9 @@ class EpsilabClient:
         default_harness: Optional[str] = None,
     ) -> EvaluationResult:
         """Create a multi-model evaluation.
+
+        .. deprecated::
+            Use RL environments instead. See ``examples/run_environment.py``.
 
         Evaluates multiple models on the same task set in a single run.
         The first model becomes the target; others become the reference
@@ -575,6 +608,12 @@ class EpsilabClient:
             InsufficientCreditsError: If the account cannot afford the
                 evaluation.
         """
+        import warnings
+        warnings.warn(
+            "create_evaluation() is deprecated. Use RL environments instead. "
+            "See examples/run_environment.py",
+            DeprecationWarning, stacklevel=2,
+        )
         model_entries = []
         for m in models:
             if isinstance(m, str):
@@ -613,19 +652,14 @@ class EpsilabClient:
     ) -> CostEstimate:
         """Estimate the credit cost of an evaluation before running it.
 
-        Args:
-            models: Same format as :meth:`create_evaluation`.
-            task_source: Task source (see :meth:`create_evaluation`).
-            domains: Filter tasks by domain.
-            max_tasks: Cap the number of tasks.
-            human_verified_only: Only use human-verified tasks.
-            default_harness: Default agent harness.
-
-        Returns:
-            A :class:`~epsilab.models.CostEstimate` with per-model
-            breakdowns, total credits, and whether the balance is
-            sufficient.
+        .. deprecated::
+            Use RL environments instead.
         """
+        import warnings
+        warnings.warn(
+            "estimate_evaluation_cost() is deprecated. Use RL environments instead.",
+            DeprecationWarning, stacklevel=2,
+        )
         model_entries = []
         for m in models:
             if isinstance(m, str):
@@ -668,7 +702,7 @@ class EpsilabClient:
             json_body={"instructions": instructions},
         )
 
-    # ── gaps, insights & artifacts ───────────────────────────────────
+    # ── gaps, insights & artifacts (deprecated) ─────────────────────
 
     def get_gaps(self, run_id: str) -> List[GapSummary]:
         """Get capability gaps found in a completed run."""
@@ -821,7 +855,7 @@ class EpsilabClient:
         """
         return self._request("POST", f"/v1/runs/{self._path_segment(run_id)}/forge")
 
-    # ── cross-run analytics ──────────────────────────────────────────
+    # ── cross-run analytics (deprecated) ─────────────────────────────
 
     def get_leaderboard(self) -> Dict[str, Any]:
         """Get cross-run model leaderboard.
@@ -846,7 +880,7 @@ class EpsilabClient:
         """Get per-domain best-model recommendations."""
         return self._request("GET", "/v1/insights/precomputed")
 
-    # ── routing ──────────────────────────────────────────────────────
+    # ── routing (deprecated) ──────────────────────────────────────────
 
     def route(
         self,
@@ -857,6 +891,9 @@ class EpsilabClient:
         router_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get a model-harness recommendation for a task.
+
+        .. deprecated::
+            Routing is deprecated.
 
         The trained router predicts which model-harness pair will score
         best on the given prompt, based on patterns learned from past
@@ -897,6 +934,11 @@ class EpsilabClient:
                 router_name="legal-team",
             )
         """
+        import warnings
+        warnings.warn(
+            "route() is deprecated.",
+            DeprecationWarning, stacklevel=2,
+        )
         body: Dict[str, Any] = {
             "prompt": prompt,
             "strategy": strategy,
@@ -1289,7 +1331,7 @@ class EpsilabClient:
         """Delete a custom task you own."""
         self._request("DELETE", f"/v1/tasks/{self._path_segment(task_id)}")
 
-    # ── voice evaluations ─────────────────────────────────────────────
+    # ── voice evaluations (deprecated) ──────────────────────────────
 
     def register_voice_asset(
         self,
@@ -1309,6 +1351,9 @@ class EpsilabClient:
     ) -> Dict[str, Any]:
         """Register a voice asset for use in voice evaluation tasks.
 
+        .. deprecated::
+            Voice evaluations are deprecated.
+
         Args:
             asset_id: Unique identifier for this asset.
             uri: URI pointing to the audio file (``gs://``, ``s3://``,
@@ -1327,6 +1372,11 @@ class EpsilabClient:
         Returns:
             Dict with the validated ``asset`` record.
         """
+        import warnings
+        warnings.warn(
+            "Voice evaluations are deprecated.",
+            DeprecationWarning, stacklevel=2,
+        )
         body: Dict[str, Any] = {
             "asset_id": asset_id,
             "uri": uri,
@@ -1874,7 +1924,7 @@ class EpsilabClient:
             params["domain"] = domain
         return self._request("GET", "/v1/rl/stats", params=params)
 
-    # ── capability matrix ─────────────────────────────────────────────
+    # ── capability matrix (deprecated) ──────────────────────────────
 
     def get_matrix_models(
         self,
@@ -1884,6 +1934,9 @@ class EpsilabClient:
     ) -> Dict[str, Any]:
         """List all models you've evaluated, with aggregated stats.
 
+        .. deprecated::
+            Capability matrix is deprecated.
+
         Args:
             modality: Filter by modality (``text``, ``voice``).
             min_tasks: Minimum tasks evaluated to include a model (default 5).
@@ -1891,6 +1944,11 @@ class EpsilabClient:
         Returns:
             Dict with model stats across all evaluations.
         """
+        import warnings
+        warnings.warn(
+            "Capability matrix methods are deprecated.",
+            DeprecationWarning, stacklevel=2,
+        )
         params: Dict[str, Any] = {"min_tasks": min_tasks}
         if modality:
             params["modality"] = modality
