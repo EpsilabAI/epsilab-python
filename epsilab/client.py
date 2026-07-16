@@ -42,6 +42,7 @@ from .models import (
 )
 
 logger = logging.getLogger("epsilab")
+_request_logger = logging.getLogger("epsilab.http")
 
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _DEFAULT_MAX_RETRIES = 3
@@ -258,12 +259,18 @@ class EpsilabClient:
         json_body: Optional[Dict[str, Any]] = None,
         extra_headers: Optional[Dict[str, str]] = None,
     ) -> Any:
+        t0 = time.monotonic()
+        _request_logger.debug("%s %s", method, path)
         resp = self._buffered_request_with_retry(
             method,
             path,
             params=params,
             json_body=json_body,
             extra_headers=extra_headers,
+        )
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        _request_logger.debug(
+            "%s %s -> %d (%dms)", method, path, resp.status_code, elapsed_ms
         )
         self._check_response_errors(resp)
         if resp.status_code == 204:

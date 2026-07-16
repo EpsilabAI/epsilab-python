@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -29,6 +30,8 @@ from . import __version__
 from ._prompt import confirm, info, is_interactive, select, select_or_create, status, step, text
 from .client import EpsilabClient
 from .exceptions import ApiError, AuthError, EpsilabError
+
+_cli_logger = logging.getLogger("epsilab.cli")
 
 _CONFIG_DIR = Path.home() / ".epsilab"
 _CONFIG_FILE = _CONFIG_DIR / "credentials.json"
@@ -654,12 +657,14 @@ def _resolve_listing(client: EpsilabClient, namespace_id: str, slug: str, title:
 
 def cmd_deploy(args: argparse.Namespace) -> None:
     """Deploy an environment or application tool. Auto-detects project type."""
+    deploy_start = time.monotonic()
     directory = Path(args.directory).resolve()
     if not directory.is_dir():
         _err(f"Not a directory: {directory}")
 
     detected = _detect_project_type(directory)
     project_type = detected["type"]
+    _cli_logger.debug("Detected project type: %s in %s", project_type, directory)
 
     if project_type == "unknown":
         files = [f.name for f in directory.iterdir() if f.is_file()]
@@ -764,9 +769,9 @@ def cmd_deploy(args: argparse.Namespace) -> None:
         namespace_id = project["namespace_id"]
 
         if project.get("type") == "tool" or project_type == "tool":
-            _deploy_tool(args, client, directory, detected, project, namespace_id)
+            _deploy_tool(args, client, directory, detected, project, namespace_id, deploy_start)
         else:
-            _deploy_environment(args, client, directory, detected, project, namespace_id)
+            _deploy_environment(args, client, directory, detected, project, namespace_id, deploy_start)
 
     except EpsilabError as e:
         _err(str(e))
@@ -821,6 +826,7 @@ def _resolve_tool(client: EpsilabClient, namespace_id: str, slug: str, title: st
 def _deploy_tool(
     args: argparse.Namespace, client: EpsilabClient,
     directory: Path, detected: dict, project: dict, namespace_id: str,
+    deploy_start: float = 0.0,
 ) -> None:
     """Build and register an Application Tool release."""
     import subprocess
@@ -878,8 +884,9 @@ def _deploy_tool(
     release_id = rel.get("release_id", rel.get("id", "?"))
     status(f"Release: {release_id}", ok=True)
 
+    deploy_elapsed = time.monotonic() - deploy_start
     print()
-    _ok(f"Deployed {project['slug']} v{version}")
+    _ok(f"Deployed {project['slug']} v{version} ({deploy_elapsed:.1f}s)")
     _ok(f"  Release:  {release_id}")
     _ok(f"  Package:  {wheel.name}")
     _ok(f"  Plugins:  {', '.join(plugin_names)}")
@@ -896,6 +903,7 @@ def _detect_plugin_names(directory: Path) -> list[str]:
 def _deploy_environment(
     args: argparse.Namespace, client: EpsilabClient,
     directory: Path, detected: dict, project: dict, namespace_id: str,
+    deploy_start: float = 0.0,
 ) -> None:
     """Build, push, and register an environment release."""
     listing_id = project["listing_id"]
@@ -1030,8 +1038,9 @@ def _deploy_environment(
         deploy_id = deploy_result.get("deployment_id", deploy_result.get("id", "?"))
         status(f"Deployed: {deploy_id}", ok=True)
 
+    deploy_elapsed = time.monotonic() - deploy_start
     print()
-    _ok(f"Deployed {project['slug']} v{version}")
+    _ok(f"Deployed {project['slug']} v{version} ({deploy_elapsed:.1f}s)")
     _ok(f"  Release:  {release.release_id}")
     _ok(f"  Image:    {image_tag}")
     _ok(f"  Tasks:    {len(members)}")
@@ -1928,18 +1937,26 @@ def cmd_env_session_create(args: argparse.Namespace) -> None:
         if not deployment_id or not task_id:
             _err("--deployment-id and --task-id are required.")
 
+        t0 = time.monotonic()
         session = client.create_environment_session(
             deployment_id=deployment_id,
             task_id=task_id,
             seed=args.seed,
         )
+        elapsed = time.monotonic() - t0
         _ok(f"Session created: {session.session_id}")
-        _ok(f"  status: {session.status}")
-        _ok(f"  task: {session.task_id}")
+        _ok(f"  status:     {session.status}")
+        _ok(f"  task:       {session.task_id}")
+        _ok(f"  deployment: {deployment_id}")
+        _ok(f"  latency:    {elapsed:.1f}s")
+        if session.seed is not None:
+            _ok(f"  seed:       {session.seed}")
         if session.observation:
-            _ok(f"  observation: {session.observation[:200]}")
+            _ok(f"  observation: {session.observation[:300]}")
         if session.session_token:
-            _ok(f"  token: {session.session_token[:20]}...")
+            _ok(f"  token:      {session.session_token[:20]}...")
+        _ok("")
+        _ok(f"Next: epsilab env session step {session.session_id} \"<action>\" --token {session.session_token[:20]}...")
         if args.json:
             _json_out(session.to_dict())
     except EpsilabError as e:
@@ -1963,17 +1980,36 @@ def cmd_env_session_step(args: argparse.Namespace) -> None:
         if not session_id or not action:
             _err("session_id and action are required.")
 
+        t0 = time.monotonic()
         result = client.environment_step(
             session_id=session_id,
             action=action,
             session_token=args.session_token,
         )
-        _ok(f"Reward: {result.reward}")
-        _ok(f"Terminated: {result.terminated}  Truncated: {result.truncated}")
+        elapsed = time.monotonic() - t0
+
+        reward_str = f"{result.reward:.4f}" if result.reward is not None else "-"
+        status_parts = []
+        if result.terminated:
+            status_parts.append("TERMINAL")
+        if result.truncated:
+            status_parts.append("TRUNCATED")
+        status_label = " | ".join(status_parts) if status_parts else "continue"
+
+        _ok(f"Step result ({elapsed:.1f}s)")
+        _ok(f"  reward:  {reward_str}")
+        _ok(f"  status:  {status_label}")
         if result.observation:
-            _ok(f"Observation: {result.observation[:300]}")
+            obs_lines = result.observation.split("\n")
+            preview = "\n           ".join(obs_lines[:10])
+            _ok(f"  observe: {preview}")
+            if len(obs_lines) > 10:
+                _ok(f"           ... ({len(obs_lines) - 10} more lines)")
         if result.info:
-            _ok(f"Info: {json.dumps(result.info, default=str)[:200]}")
+            _ok(f"  info:    {json.dumps(result.info, default=str)[:200]}")
+        if result.terminated or result.truncated:
+            _ok("")
+            _ok(f"Session complete.")
         if args.json:
             _json_out({"observation": result.observation, "reward": result.reward,
                         "terminated": result.terminated, "truncated": result.truncated,
@@ -1989,9 +2025,25 @@ def cmd_env_session_show(args: argparse.Namespace) -> None:
     try:
         session = client.get_environment_session(args.session_id)
         _ok(f"Session: {session.session_id}")
-        _ok(f"  status: {session.status}")
-        _ok(f"  deployment: {session.deployment_id}")
-        _ok(f"  task: {session.task_id}")
+        _ok(f"  status:      {session.status}")
+        _ok(f"  task:        {session.task_id}")
+        _ok(f"  env_type:    {getattr(session, 'env_type', '-')}")
+        _ok(f"  reward_mode: {getattr(session, 'reward_mode', '-')}")
+        _ok(f"  steps:       {getattr(session, 'steps_taken', '-')}")
+        total = getattr(session, "total_reward", None)
+        _ok(f"  reward:      {total:.4f}" if total is not None else "  reward:      -")
+        if getattr(session, "deployment_id", None):
+            _ok(f"  deployment:  {session.deployment_id}")
+        if getattr(session, "seed", None) is not None:
+            _ok(f"  seed:        {session.seed}")
+        if getattr(session, "terminal_reason", None):
+            _ok(f"  terminal:    {session.terminal_reason}")
+        created = getattr(session, "created_at", None)
+        if created:
+            _ok(f"  created:     {str(created)[:19]}")
+        closed = getattr(session, "closed_at", None)
+        if closed:
+            _ok(f"  closed:      {str(closed)[:19]}")
         if session.observation:
             _ok(f"  observation: {session.observation[:300]}")
         if args.json:
@@ -2553,6 +2605,7 @@ def cmd_rl_session(args: argparse.Namespace) -> None:
         if not task_id:
             _err("task_id is required.")
 
+        t0 = time.monotonic()
         session = client.create_rl_session(
             task_id=task_id,
             env_type=args.env_type,
@@ -2560,11 +2613,19 @@ def cmd_rl_session(args: argparse.Namespace) -> None:
             seed=args.seed,
             max_steps=args.max_steps,
         )
+        elapsed = time.monotonic() - t0
         _ok(f"RL session created: {session.session_id}")
-        _ok(f"  task: {session.task_id}")
-        _ok(f"  status: {session.status}")
+        _ok(f"  task:        {session.task_id}")
+        _ok(f"  env_type:    {session.env_type}")
+        _ok(f"  reward_mode: {session.reward_mode}")
+        _ok(f"  status:      {session.status}")
+        _ok(f"  latency:     {elapsed:.1f}s")
+        if session.seed is not None:
+            _ok(f"  seed:        {session.seed}")
         if session.observation:
             _ok(f"  observation: {session.observation[:300]}")
+        _ok("")
+        _ok(f"Next: epsilab rl step {session.session_id} \"<your action>\"")
         if args.json:
             _json_out(session.to_dict())
     except EpsilabError as e:
@@ -2576,11 +2637,34 @@ def cmd_rl_session(args: argparse.Namespace) -> None:
 def cmd_rl_step(args: argparse.Namespace) -> None:
     client = _get_client()
     try:
+        t0 = time.monotonic()
         result = client.rl_step(args.session_id, args.action)
-        _ok(f"Reward: {result.reward}")
-        _ok(f"Terminated: {result.terminated}  Truncated: {result.truncated}")
+        elapsed = time.monotonic() - t0
+
+        reward_str = f"{result.reward:.4f}" if result.reward is not None else "-"
+        status_parts = []
+        if result.terminated:
+            status_parts.append("TERMINAL")
+        if result.truncated:
+            status_parts.append("TRUNCATED")
+        status_label = " | ".join(status_parts) if status_parts else "continue"
+
+        _ok(f"Step result ({elapsed:.1f}s)")
+        _ok(f"  reward:  {reward_str}")
+        _ok(f"  status:  {status_label}")
         if result.observation:
-            _ok(f"Observation: {result.observation[:300]}")
+            obs_lines = result.observation.split("\n")
+            preview = "\n           ".join(obs_lines[:10])
+            _ok(f"  observe: {preview}")
+            if len(obs_lines) > 10:
+                _ok(f"           ... ({len(obs_lines) - 10} more lines)")
+        if result.info:
+            _ok(f"  info:    {json.dumps(result.info, default=str)[:200]}")
+
+        if result.terminated or result.truncated:
+            _ok("")
+            _ok(f"Session complete. View trajectory:")
+            _ok(f"  epsilab rl trajectory {args.session_id}")
         if args.json:
             _json_out({"observation": result.observation, "reward": result.reward,
                         "terminated": result.terminated, "truncated": result.truncated,
@@ -2595,19 +2679,48 @@ def cmd_rl_trajectory(args: argparse.Namespace) -> None:
     client = _get_client()
     try:
         if args.verify:
+            t0 = time.monotonic()
             result = client.verify_rl_trajectory(args.session_id)
-            _ok(f"Verification: {result.get('status', '?')}")
-            if result.get("mismatches"):
-                _ok(f"  mismatches: {result['mismatches']}")
+            elapsed = time.monotonic() - t0
+            status_icon = "PASS" if result.get("verified") or result.get("status") == "valid" else "FAIL"
+            _ok(f"Verification: {status_icon} ({elapsed:.1f}s)")
+            if result.get("steps_replayed"):
+                _ok(f"  steps replayed: {result['steps_replayed']}")
+            if result.get("divergences"):
+                _ok(f"  divergences:    {len(result['divergences'])}")
+                for d in result["divergences"][:5]:
+                    _ok(f"    step {d.get('step', '?')}: {d.get('field', '?')} mismatch")
             if args.json:
                 _json_out(result)
             return
 
         traj = client.get_rl_trajectory(args.session_id)
+        total = traj.total_reward
         _ok(f"Trajectory: {traj.session_id}")
-        _ok(f"  task: {traj.task_id}")
-        _ok(f"  steps: {len(traj.steps)}")
-        _ok(f"  total reward: {traj.total_reward}")
+        _ok(f"  task:         {traj.task_id}")
+        _ok(f"  env_type:     {traj.env_type}")
+        _ok(f"  steps:        {len(traj.steps)}")
+        _ok(f"  total reward: {total:.4f}" if total is not None else "  total reward: -")
+        _ok("")
+
+        for s in traj.steps:
+            r = s.get("reward")
+            reward_str = f"{r:+.4f}" if r is not None else "     -"
+            flags = []
+            if s.get("terminated"):
+                flags.append("TERMINAL")
+            if s.get("truncated"):
+                flags.append("TRUNCATED")
+            latency = s.get("latency_ms")
+            lat_str = f" ({latency}ms)" if latency else ""
+            flag_str = f" [{', '.join(flags)}]" if flags else ""
+
+            _ok(f"  Step {s['step_idx']:>2}  reward={reward_str}{lat_str}{flag_str}")
+            obs = s.get("observation")
+            if obs and not args.json:
+                obs_preview = obs[:120].replace("\n", " ")
+                _ok(f"           {obs_preview}{'...' if len(obs) > 120 else ''}")
+
         if args.json:
             _json_out(traj.to_dict())
     except EpsilabError as e:
@@ -2624,12 +2737,35 @@ def cmd_rl_sessions(args: argparse.Namespace) -> None:
             limit=args.limit,
         )
         sessions = result.get("sessions", result) if isinstance(result, dict) else result
+        total = result.get("total", len(sessions)) if isinstance(result, dict) else len(sessions)
         if not sessions:
             _ok("No RL sessions found.")
             return
+
+        _ok(f"Sessions ({len(sessions)} of {total})")
+        _ok("")
+        rows = []
         for s in sessions:
-            _ok(f"  {s.get('session_id', '?')}  task={s.get('task_id', '?')}"
-                f"  status={s.get('status', '?')}  reward={s.get('total_reward', '?')}")
+            reward = s.get("total_reward")
+            rows.append({
+                "id": s.get("session_id", "?")[:12],
+                "task": s.get("task_id", "?")[:40],
+                "status": s.get("status", "?"),
+                "steps": str(s.get("steps_taken", 0)),
+                "reward": f"{reward:.3f}" if reward is not None else "-",
+                "created": s.get("created_at", "?")[:19].replace("T", " "),
+            })
+        _table(rows, ["id", "task", "status", "steps", "reward", "created"])
+
+        completed = sum(1 for s in sessions if s.get("status") == "completed")
+        active = sum(1 for s in sessions if s.get("status") in ("active", "provisioning"))
+        rewards = [s["total_reward"] for s in sessions if s.get("total_reward") is not None]
+        _ok("")
+        if rewards:
+            _ok(f"  completed: {completed}  active: {active}  avg_reward: {sum(rewards)/len(rewards):.3f}")
+        else:
+            _ok(f"  completed: {completed}  active: {active}")
+
         if args.json:
             _json_out(result)
     except EpsilabError as e:
@@ -2757,6 +2893,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--version", action="version", version=f"epsilab {__version__}"
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose logging (HTTP requests, timing, debug info)",
     )
     parser.add_argument(
         "--profile", "-p",
@@ -3214,6 +3355,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if getattr(args, "verbose", False):
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+            stream=sys.stderr,
+        )
+    else:
+        logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
     if not args.command:
         parser.print_help()
