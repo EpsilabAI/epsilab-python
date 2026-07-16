@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -123,13 +124,21 @@ def _json_out(data: Any) -> None:
 def cmd_login(args: argparse.Namespace) -> None:
     api_key = args.api_key
     if not api_key:
+        api_keys_url = f"{_DASHBOARD_URL}/settings"
         if is_interactive():
             step("Log in to Epsilab")
-            info(f"Create an API key at {_DASHBOARD_URL} (Settings > API Keys)")
+            if confirm("Open browser to create an API key?"):
+                _ok(f"  Opening {api_keys_url} ...")
+                webbrowser.open(api_keys_url)
+                _ok("  Copy your API key from Settings > API Keys and paste it below.\n")
             api_key = text("API key", required=True)
         else:
-            _ok(f"Create an API key at {_DASHBOARD_URL} (Settings > API Keys)")
-            api_key = input("Enter your Epsilab API key: ").strip()
+            _ok(f"Create an API key at {api_keys_url}")
+            try:
+                api_key = input("Enter your Epsilab API key: ").strip()
+            except KeyboardInterrupt:
+                print()
+                sys.exit(1)
     if not api_key:
         _err("API key cannot be empty.")
 
