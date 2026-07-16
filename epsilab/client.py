@@ -2438,13 +2438,14 @@ class EpsilabClient:
         body: Dict[str, Any] = {"task_id": task_id}
         if seed is not None:
             body["seed"] = seed
-        headers: Dict[str, str] = {}
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
+        headers: Dict[str, str] = {
+            "Idempotency-Key": idempotency_key or self._auto_idem_key(),
+        }
         data = self._request(
             "POST",
             f"/v1/environment-deployments/{self._path_segment(deployment_id)}/sessions",
             json_body=body,
+            extra_headers=headers,
         )
         return EnvironmentSession.from_dict(data)
 
@@ -2487,11 +2488,11 @@ class EpsilabClient:
             An :class:`~epsilab.models.EnvironmentStepResult` with
             observation, reward, and terminal flags.
         """
-        extra_headers: Dict[str, str] = {}
+        extra_headers: Dict[str, str] = {
+            "Idempotency-Key": idempotency_key or self._auto_idem_key(),
+        }
         if session_token:
             extra_headers["X-RL-Session-Token"] = session_token
-        if idempotency_key:
-            extra_headers["Idempotency-Key"] = idempotency_key
         data = self._request(
             "POST",
             f"/v1/environment-sessions/{self._path_segment(session_id)}/step",
@@ -2517,6 +2518,7 @@ class EpsilabClient:
         return self._request(
             "POST",
             f"/v1/environment-sessions/{self._path_segment(session_id)}/cancel",
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
         )
 
     def refresh_session_token(self, session_id: str) -> Dict[str, Any]:
@@ -2654,6 +2656,7 @@ class EpsilabClient:
             "POST",
             "/v1/environment-entitlements",
             json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
         )
 
     def revoke_entitlement(
@@ -2676,6 +2679,7 @@ class EpsilabClient:
         return self._request(
             "POST",
             f"/v1/environment-entitlements/{self._path_segment(entitlement_id)}/revoke",
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
         )
 
     # ── Exports & batches ────────────────────────────────────────────
@@ -2717,6 +2721,7 @@ class EpsilabClient:
             "POST",
             "/v1/environment-exports",
             json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
         )
 
     def get_environment_export(self, export_id: str) -> Dict[str, Any]:
@@ -2787,7 +2792,10 @@ class EpsilabClient:
         }
         if max_credits is not None:
             body["max_credits"] = max_credits
-        return self._request("POST", "/v1/environment-batches", json_body=body)
+        return self._request(
+            "POST", "/v1/environment-batches", json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
 
     def get_batch(self, batch_id: str) -> Dict[str, Any]:
         """Get batch status and progress.
@@ -2898,7 +2906,10 @@ class EpsilabClient:
             body["severity"] = severity
         if evidence_digest:
             body["evidence_digest"] = evidence_digest
-        return self._request("POST", "/v1/environment-disputes", json_body=body)
+        return self._request(
+            "POST", "/v1/environment-disputes", json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
 
     def get_dispute(self, dispute_id: str) -> Dict[str, Any]:
         """Get details of a dispute.
@@ -3197,30 +3208,29 @@ class EpsilabClient:
         self,
         *,
         listing_id: str,
-        listing_owner_tenant_id: str,
         rating: int,
         title: str,
         body: Optional[str] = None,
         usage_hours: Optional[float] = None,
         idempotency_key: Optional[str] = None,
+        listing_owner_tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Submit a review for an environment listing.
 
         Args:
             listing_id: The listing to review.
-            listing_owner_tenant_id: Tenant ID of the listing creator.
             rating: Rating (1-5).
             title: Review title.
             body: Optional review body text.
             usage_hours: Optional hours of usage to report.
             idempotency_key: Unique key for at-most-once delivery.
+            listing_owner_tenant_id: Deprecated, ignored.
 
         Returns:
             The created review record.
         """
         payload: Dict[str, Any] = {
             "listing_id": listing_id,
-            "listing_owner_tenant_id": listing_owner_tenant_id,
             "rating": rating,
             "title": title,
         }
@@ -3228,7 +3238,8 @@ class EpsilabClient:
             payload["body"] = body
         if usage_hours is not None:
             payload["usage_hours"] = usage_hours
-        return self._request("POST", "/v1/reviews", json_body=payload)
+        headers = {"Idempotency-Key": idempotency_key or self._auto_idem_key()}
+        return self._request("POST", "/v1/reviews", json_body=payload, extra_headers=headers)
 
     def list_reviews(
         self,
@@ -3254,21 +3265,18 @@ class EpsilabClient:
         self,
         *,
         listing_id: str,
-        listing_owner_tenant_id: str,
-        amount_cents: int,
-        license_version_id: Optional[str] = None,
-        currency: str = "usd",
+        license_version_id: str,
         payment_reference: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        listing_owner_tenant_id: Optional[str] = None,
+        amount_cents: Optional[int] = None,
+        currency: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Purchase access to an environment listing.
 
         Args:
             listing_id: The listing to purchase.
-            listing_owner_tenant_id: Creator's tenant ID.
-            amount_cents: Purchase price in cents.
-            license_version_id: Optional specific license version.
-            currency: Currency code (default ``usd``).
+            license_version_id: License version to purchase under.
             payment_reference: Optional external payment reference.
             idempotency_key: Unique key for at-most-once delivery.
 
@@ -3277,15 +3285,12 @@ class EpsilabClient:
         """
         payload: Dict[str, Any] = {
             "listing_id": listing_id,
-            "listing_owner_tenant_id": listing_owner_tenant_id,
-            "amount_cents": amount_cents,
-            "currency": currency,
+            "license_version_id": license_version_id,
         }
-        if license_version_id:
-            payload["license_version_id"] = license_version_id
         if payment_reference:
             payload["payment_reference"] = payment_reference
-        return self._request("POST", "/v1/purchases", json_body=payload)
+        headers = {"Idempotency-Key": idempotency_key or self._auto_idem_key()}
+        return self._request("POST", "/v1/purchases", json_body=payload, extra_headers=headers)
 
     def list_purchases(
         self,
@@ -3483,7 +3488,7 @@ class EpsilabClient:
             "usage_policy": usage_policy,
             "license_id": license_id,
         }
-        if members:
+        if members is not None:
             body["members"] = members
         return self._request(
             "POST", "/v1/task-pack-releases", json_body=body,
@@ -3699,6 +3704,7 @@ class EpsilabClient:
             "POST",
             f"/v1/environment-deployments/{self._path_segment(deployment_id)}/revisions",
             json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
         )
 
     # ── Creator: quality management ──────────────────────────────────
@@ -3733,7 +3739,10 @@ class EpsilabClient:
             body["deployment_id"] = deployment_id
         if config:
             body["config"] = config
-        return self._request("POST", "/v1/environment-quality-reports", json_body=body)
+        return self._request(
+            "POST", "/v1/environment-quality-reports", json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
 
     # ── Creator: analytics ───────────────────────────────────────────
 
@@ -3797,7 +3806,8 @@ class EpsilabClient:
             body["avatar_url"] = avatar_url
         if contact_email:
             body["contact_email"] = contact_email
-        return self._request("POST", "/v1/creator-profiles", json_body=body)
+        headers = {"Idempotency-Key": idempotency_key or self._auto_idem_key()}
+        return self._request("POST", "/v1/creator-profiles", json_body=body, extra_headers=headers)
 
     def get_creator_profile(self) -> Dict[str, Any]:
         """Get your creator profile."""
@@ -3856,10 +3866,12 @@ class EpsilabClient:
         Returns:
             The publish request record.
         """
+        headers = {"Idempotency-Key": idempotency_key or self._auto_idem_key()}
         return self._request(
             "POST",
             "/v1/moderation/publish-request",
             json_body={"listing_id": listing_id},
+            extra_headers=headers,
         )
 
     def create_changelog(
@@ -3902,7 +3914,8 @@ class EpsilabClient:
             payload["notify_buyers"] = notify_buyers
         if listing_id:
             payload["listing_id"] = listing_id
-        return self._request("POST", "/v1/changelogs", json_body=payload)
+        headers = {"Idempotency-Key": idempotency_key or self._auto_idem_key()}
+        return self._request("POST", "/v1/changelogs", json_body=payload, extra_headers=headers)
 
     def list_changelogs(
         self,

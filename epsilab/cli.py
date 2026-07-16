@@ -519,9 +519,9 @@ def cmd_env_push(args: argparse.Namespace) -> None:
         tp_name = tp_config.get("name", f"{listing_id}-tasks")
         tp_artifact_ref = args.task_pack_ref or tp_config.get("artifact_ref", "")
         tp_artifact_digest = args.task_pack_digest or tp_config.get("artifact_digest", "")
-        tp_usage_policy = tp_config.get("usage_policy", "open")
+        tp_usage_policy = tp_config.get("usage_policy", "training")
         tp_license_id = args.license or tp_config.get("license_id", "apache-2.0")
-        tp_members = tp_config.get("members")
+        tp_members = tp_config.get("members", [])
 
         tp_idem = _deterministic_idem_key(
             "tp", namespace_id=namespace_id, name=tp_name,
@@ -923,7 +923,7 @@ _MANIFEST_TEMPLATE = """\
     "name": "%(slug)s-tasks",
     "artifact_ref": "",
     "artifact_digest": "",
-    "usage_policy": "open",
+    "usage_policy": "training",
     "license_id": "apache-2.0"
   },
   "verifier": {
@@ -1440,6 +1440,8 @@ def cmd_env_review(args: argparse.Namespace) -> None:
     try:
         listing_id = args.listing_id
         if args.list_reviews:
+            if not listing_id:
+                _err("listing_id is required for --list.")
             reviews = client.list_reviews(listing_id, limit=args.limit)
             if not reviews:
                 _ok("No reviews yet.")
@@ -1472,13 +1474,8 @@ def cmd_env_review(args: argparse.Namespace) -> None:
         if not rating or not title:
             _err("--rating and --title are required.")
 
-        owner_id = args.owner_tenant_id
-        if not owner_id:
-            _err("--owner-tenant-id is required.")
-
         result = client.create_review(
             listing_id=listing_id,
-            listing_owner_tenant_id=owner_id,
             rating=int(rating),
             title=title,
             body=args.body,
@@ -1506,24 +1503,20 @@ def cmd_env_purchase(args: argparse.Namespace) -> None:
             return
 
         listing_id = args.listing_id
-        owner_id = args.owner_tenant_id
-        amount = args.amount_cents
+        license_version_id = getattr(args, "license_version_id", None)
 
         if is_interactive() and not listing_id:
             step("Purchase environment access")
             listing_id = text("Listing ID", required=True)
-            if not owner_id:
-                owner_id = text("Owner tenant ID", required=True)
-            if amount is None:
-                amount = int(text("Amount (cents)", default="0"))
+            if not license_version_id:
+                license_version_id = text("License version ID", required=True)
 
-        if not listing_id or not owner_id:
-            _err("listing_id and --owner-tenant-id are required.")
+        if not listing_id or not license_version_id:
+            _err("listing_id and --license-version-id are required.")
 
         result = client.create_purchase(
             listing_id=listing_id,
-            listing_owner_tenant_id=owner_id,
-            amount_cents=amount or 0,
+            license_version_id=license_version_id,
         )
         _ok(f"Purchase created: {result.get('purchase_id', '?')}")
         _ok(f"  status: {result.get('status', '?')}")
@@ -2409,8 +2402,7 @@ def build_parser() -> argparse.ArgumentParser:
     # env purchase
     purchase_p = env_sub.add_parser("purchase", help="Purchase environment access")
     purchase_p.add_argument("listing_id", nargs="?", help="Listing ID")
-    purchase_p.add_argument("--owner-tenant-id", help="Owner's tenant ID")
-    purchase_p.add_argument("--amount-cents", type=int, help="Amount in cents")
+    purchase_p.add_argument("--license-version-id", help="License version ID")
     purchase_p.add_argument("--list", dest="list_purchases", action="store_true", help="List purchases")
     purchase_p.add_argument("--limit", type=int, default=50)
     purchase_p.add_argument("--json", action="store_true")
