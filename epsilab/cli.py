@@ -121,19 +121,80 @@ def _json_out(data: Any) -> None:
 # ── Commands ─────────────────────────────────────────────────────────
 
 
+def _browser_login() -> Optional[str]:
+    """Start a local HTTP server, open the browser for auth, and wait for the
+    API key callback.  Returns the API key or None on timeout/failure."""
+    import http.server
+    import threading
+    import urllib.parse
+
+    result: Dict[str, Optional[str]] = {"key": None}
+    port = 0  # let the OS pick a free port
+
+    class CallbackHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            if parsed.path == "/callback" and "key" in params:
+                result["key"] = params["key"][0]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body style='font-family:system-ui;text-align:center;padding:60px'>"
+                    b"<h2>Authenticated!</h2>"
+                    b"<p>You can close this tab and return to the terminal.</p>"
+                    b"</body></html>"
+                )
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            pass  # suppress noisy logs
+
+    server = http.server.HTTPServer(("127.0.0.1", port), CallbackHandler)
+    actual_port = server.server_address[1]
+
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+
+    auth_url = f"{_DASHBOARD_URL}?cli_auth={actual_port}"
+    _ok(f"  Opening browser for authentication...")
+    webbrowser.open(auth_url)
+    _ok(f"  Waiting for login (press Ctrl+C to cancel)...\n")
+
+    try:
+        thread.join(timeout=120)
+    except KeyboardInterrupt:
+        print()
+        server.server_close()
+        return None
+
+    server.server_close()
+    return result["key"]
+
+
 def cmd_login(args: argparse.Namespace) -> None:
     api_key = args.api_key
     if not api_key:
-        api_keys_url = f"{_DASHBOARD_URL}/settings"
         if is_interactive():
             step("Log in to Epsilab")
-            if confirm("Open browser to create an API key?"):
-                _ok(f"  Opening {api_keys_url} ...")
-                webbrowser.open(api_keys_url)
-                _ok("  Copy your API key from Settings > API Keys and paste it below.\n")
-            api_key = text("API key", required=True)
+
+            method = select("How would you like to authenticate?", [
+                {"value": "browser", "label": "Log in with browser (opens epsilab.com)"},
+                {"value": "paste", "label": "Paste an existing API key"},
+            ], default="browser")
+
+            if method == "browser":
+                api_key = _browser_login()
+                if not api_key:
+                    _err("Browser login cancelled or timed out.")
+            else:
+                info(f"Create an API key at {_DASHBOARD_URL} (Settings > API Keys)")
+                api_key = text("API key", required=True)
         else:
-            _ok(f"Create an API key at {api_keys_url}")
+            _ok(f"Create an API key at {_DASHBOARD_URL} (Settings > API Keys)")
             try:
                 api_key = input("Enter your Epsilab API key: ").strip()
             except KeyboardInterrupt:
