@@ -4,9 +4,9 @@ Python SDK and CLI for the [Epsilab](https://www.epsilab.com) RL Environment Hub
 
 ## What is Epsilab?
 
-Epsilab is a marketplace for verified RL environments. Search, run, and export training data from hosted environments, or publish your own and earn from usage.
+Epsilab is an open hub for RL environments. Search, run, and export training data from hosted environments, or publish your own under public, shared, unlisted, or private visibility.
 
-Every environment is content-addressed, cryptographically verified, and runs in isolated sandboxes. The platform handles hosting, session management, billing, quality assurance, and training-data export.
+Environment releases are immutable and content-addressed, and hosted workloads run in isolated sandboxes. Optional quality reports and badges provide evidence beyond the publication lifecycle state.
 
 **Researchers and teams training models:**
 - Search and run hosted RL environments through a single API
@@ -233,10 +233,21 @@ client = Epsilab(load_dotenv=True)  # reads from .env file
 
 | Method | Description |
 |--------|-------------|
-| `list_environment_listings(...)` | Browse environments you have access to |
+| `list_environment_listings(...)` | Browse public, owned, and shared environments; authentication is optional for public discovery |
+| `get_environment_listing(listing_id)` | Open a visible listing directly, including unlisted links |
 | `list_public_listings(query, sort_by, ...)` | Browse the public marketplace catalog |
 | `search_environments(query, domain, ...)` | Quality-weighted environment search |
 | `get_environment_release(release_id)` | Get release details and status |
+
+### Application Tools
+
+| Method | Description |
+|--------|-------------|
+| `list_application_tools(query, plugin, ...)` | Browse public reusable application tools |
+| `get_application_tool(tool_id)` | Open a public or unlisted tool directly |
+| `get_application_tool_release(release_id)` | Get an immutable tool release |
+| `create_application_tool(...)` | Create a public, unlisted, or private tool listing |
+| `create_application_tool_release(...)` | Publish an immutable tool release |
 
 ### Hosted Sessions
 
@@ -293,7 +304,7 @@ client = Epsilab(load_dotenv=True)  # reads from .env file
 |--------|-------------|
 | `create_review(listing_id, rating, title, ...)` | Submit a review |
 | `list_reviews(listing_id)` | List reviews for a listing |
-| `create_purchase(listing_id, amount_cents, ...)` | Purchase access to a listing |
+| `create_purchase(listing_id, license_version_id, ...)` | Purchase access under a published license offer |
 | `list_purchases(...)` | List your purchases |
 
 ### Creator: Registry and Publishing
@@ -326,7 +337,7 @@ client = Epsilab(load_dotenv=True)  # reads from .env file
 | `get_creator_profile()` | Get your profile |
 | `update_creator_profile(...)` | Update your profile |
 | `create_quality_report(release_id, report_type, ...)` | Start a quality report |
-| `request_publish(listing_id)` | Submit for moderation review |
+| `request_publish(listing_id)` | Publish listing to the hub |
 | `create_changelog(release_id, version_label, summary, ...)` | Publish a changelog |
 | `list_changelogs(release_id)` | List changelogs for a release |
 

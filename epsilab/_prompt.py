@@ -8,7 +8,7 @@ No external dependencies — uses only the Python standard library.
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable, Dict, List, Optional, Sequence, TypeVar
+from typing import Callable, Dict, Optional, Sequence, TypeVar
 
 T = TypeVar("T")
 

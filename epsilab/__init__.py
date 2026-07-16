@@ -1,7 +1,7 @@
 """Epsilab Python SDK for the RL Environment Hub and Marketplace.
 
-Search, run, and export training data from verified RL environments,
-or publish your own and earn from usage.
+Discover, run, and export training data from published RL environments,
+inspect their quality evidence, or publish your own.
 
 Quick start::
 
@@ -21,6 +21,8 @@ from .exceptions import (
     RateLimitError,
 )
 from .models import (
+    ApplicationTool,
+    ApplicationToolRelease,
     EnvironmentListing,
     EnvironmentRelease,
     EnvironmentSession,
@@ -45,6 +47,8 @@ __all__ = [
     "EnvironmentRelease",
     "EnvironmentSession",
     "EnvironmentStepResult",
+    "ApplicationTool",
+    "ApplicationToolRelease",
 ]
 
-__version__ = "0.11.2"
+__version__ = "0.12.0"

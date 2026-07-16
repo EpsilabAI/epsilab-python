@@ -8,16 +8,12 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 import pytest
 
 from epsilab.cli import (
-    _CONFIG_FILE,
-    _DEFAULT_PROFILE,
     _active_profile,
     _get_client,
     _load_config,
@@ -29,7 +25,6 @@ from epsilab.cli import (
     cmd_env_verify,
     main,
 )
-from epsilab.exceptions import ApiError
 
 
 def _json_response(body, status=200):
@@ -598,7 +593,7 @@ class TestEnvCreate:
                     "namespace_id": "ns-1",
                     "slug": "my-env",
                     "title": "My Environment",
-                    "visibility": "private",
+                    "visibility": "public",
                 },
                 status=201,
             )
@@ -612,6 +607,7 @@ class TestEnvCreate:
         assert "my-env" in out
         assert captured["body"]["slug"] == "my-env"
         assert captured["body"]["title"] == "My Environment"
+        assert captured["body"]["visibility"] == "public"
 
     def test_with_visibility(self, capsys):
         captured = {}
@@ -692,7 +688,8 @@ class TestEnvQualify:
 
         out = capsys.readouterr().out
         assert "rpt-1" in out
-        assert "qualification" in out
+        assert "full_qualification" in out
+        assert captured["body"]["report_type"] == "full_qualification"
         assert captured["body"]["release_id"] == "rel-1"
 
     def test_with_report_type(self, capsys):
@@ -754,7 +751,7 @@ class TestEnvPush:
                         "listing_id": "lst-1",
                         "release_version": "1.0.0",
                         "protocol_version": "0.4.1",
-                        "status": "quarantined",
+                        "qualification_state": "qualified",
                     },
                     status=201,
                 )
@@ -769,7 +766,8 @@ class TestEnvPush:
         assert "Task pack registered: tp-1" in out
         assert "Verifier registered: ver-1" in out
         assert "rel-1" in out
-        assert "quarantined" in out
+        assert "qualified" in out
+        assert "according to the listing's visibility" in out
         assert call_count == 3
 
     def test_missing_listing_id_exits(self, capsys):

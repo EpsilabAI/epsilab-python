@@ -7,6 +7,8 @@ default-value handling for every public model class.
 import json
 
 from epsilab.models import (
+    ApplicationTool,
+    ApplicationToolRelease,
     ArtifactSummary,
     CostEstimate,
     CustomTaskUploadResult,
@@ -523,7 +525,7 @@ class TestRLTrajectory:
 
 class TestEnvironmentListing:
     def test_from_dict_full(self):
-        l = EnvironmentListing.from_dict(
+        listing = EnvironmentListing.from_dict(
             {
                 "listing_id": "lst-001",
                 "namespace_id": "ns-001",
@@ -537,17 +539,17 @@ class TestEnvironmentListing:
                 "updated_at": "2026-06-15T00:00:00",
             }
         )
-        assert l.listing_id == "lst-001"
-        assert l.namespace_id == "ns-001"
-        assert l.slug == "code-sandbox-v1"
-        assert l.title == "Code Sandbox v1"
-        assert l.visibility == "public"
-        assert l.moderation_state == "approved"
-        assert l.recommended_release_id == "rel-001"
-        assert l.created_at == "2026-06-01T00:00:00"
+        assert listing.listing_id == "lst-001"
+        assert listing.namespace_id == "ns-001"
+        assert listing.slug == "code-sandbox-v1"
+        assert listing.title == "Code Sandbox v1"
+        assert listing.visibility == "public"
+        assert listing.moderation_state == "approved"
+        assert listing.recommended_release_id == "rel-001"
+        assert listing.created_at == "2026-06-01T00:00:00"
 
     def test_from_dict_defaults(self):
-        l = EnvironmentListing.from_dict(
+        listing = EnvironmentListing.from_dict(
             {
                 "listing_id": "lst-002",
                 "namespace_id": "ns-002",
@@ -555,10 +557,10 @@ class TestEnvironmentListing:
                 "title": "Test",
             }
         )
-        assert l.summary == ""
-        assert l.visibility == "private"
-        assert l.moderation_state == "pending"
-        assert l.recommended_release_id is None
+        assert listing.summary == ""
+        assert listing.visibility == "public"
+        assert listing.moderation_state == "approved"
+        assert listing.recommended_release_id is None
 
     def test_roundtrip(self):
         listing = EnvironmentListing(
@@ -583,30 +585,91 @@ class TestEnvironmentListing:
         j = json.loads(listing.to_json())
         assert j["listing_id"] == "lst-004"
 
+    def test_catalog_fields(self):
+        listing = EnvironmentListing.from_dict(
+            {
+                "listing_id": "lst-catalog",
+                "namespace": "community",
+                "slug": "code-env",
+                "title": "Code Env",
+                "listing_revision": 4,
+                "is_owner": False,
+                "release_id": "rel-1",
+                "release_version": "1.2.0",
+                "qualification_state": "qualified",
+                "deployment_id": "dep-1",
+            }
+        )
+        assert listing.namespace == "community"
+        assert listing.revision == 4
+        assert listing.is_owner is False
+        assert listing.release_id == "rel-1"
+        assert listing.deployment_id == "dep-1"
+
+
+class TestApplicationTools:
+    def test_tool_and_release_from_dict(self):
+        tool = ApplicationTool.from_dict(
+            {
+                "tool_id": "tool-1",
+                "namespace_id": "ns-1",
+                "namespace": "community",
+                "slug": "eng-workspace",
+                "title": "Engineering Workspace",
+                "category": "engineering",
+                "plugin_names": ["github", "slack"],
+            }
+        )
+        assert tool.visibility == "public"
+        assert tool.plugin_names == ["github", "slack"]
+
+        release = ApplicationToolRelease.from_dict(
+            {
+                "release_id": "rel-1",
+                "tool_id": "tool-1",
+                "release_version": "1.0.0",
+                "content_digest": "sha256:content",
+                "qualification_state": "qualified",
+                "artifact_digest": "sha256:artifact",
+                "appsuite_version": "0.1.0",
+                "plugin_names": ["github", "slack"],
+                "seed_schema_digest": "sha256:seed",
+                "interface_schema_digest": "sha256:interface",
+                "license_id": "apache-2.0",
+                "manifest": {"schema_version": 1},
+            }
+        )
+        assert release.tool_id == "tool-1"
+        assert release.manifest["schema_version"] == 1
+
 
 class TestEnvironmentSession:
     def test_from_dict_full(self):
         s = EnvironmentSession.from_dict(
             {
                 "session_id": "sess-001",
-                "deployment_id": "dep-001",
+                "deployment_revision_id": "rev-001",
                 "task_id": "task-001",
                 "status": "active",
+                "env_type": "code_sandbox",
+                "reward_mode": "partial_credit",
                 "session_token": "tok-abc",
                 "session_token_expires_at": "2026-06-01T01:00:00",
                 "observation": "Write a function...",
-                "reward": 0.5,
+                "total_reward": 0.5,
                 "steps_taken": 3,
                 "seed": 42,
+                "protocol_version": "1.0",
                 "created_at": "2026-06-01T00:00:00",
             }
         )
         assert s.session_id == "sess-001"
-        assert s.deployment_id == "dep-001"
+        assert s.deployment_revision_id == "rev-001"
         assert s.status == "active"
         assert s.session_token == "tok-abc"
         assert s.observation == "Write a function..."
         assert s.reward == 0.5
+        assert s.total_reward == 0.5
         assert s.steps_taken == 3
         assert s.seed == 42
         assert s.is_active is True
@@ -616,7 +679,7 @@ class TestEnvironmentSession:
         s = EnvironmentSession.from_dict(
             {
                 "session_id": "sess-002",
-                "deployment_id": "dep-002",
+                "deployment_revision_id": "rev-002",
                 "task_id": "task-002",
                 "status": "provisioning",
             }
@@ -634,7 +697,7 @@ class TestEnvironmentSession:
             s = EnvironmentSession.from_dict(
                 {
                     "session_id": "s1",
-                    "deployment_id": "d1",
+                    "deployment_revision_id": "r1",
                     "task_id": "t1",
                     "status": status,
                 }
@@ -645,9 +708,9 @@ class TestEnvironmentSession:
     def test_roundtrip(self):
         session = EnvironmentSession(
             session_id="sess-003",
-            deployment_id="dep-003",
             task_id="task-003",
             status="active",
+            deployment_revision_id="rev-003",
             session_token="tok-xyz",
         )
         d = session.to_dict()
@@ -658,9 +721,9 @@ class TestEnvironmentSession:
     def test_to_json(self):
         session = EnvironmentSession(
             session_id="sess-004",
-            deployment_id="dep-004",
             task_id="task-004",
             status="completed",
+            deployment_revision_id="rev-004",
         )
         j = json.loads(session.to_json())
         assert j["status"] == "completed"
@@ -754,7 +817,7 @@ class TestEnvironmentRelease:
         )
         assert r.release_version == ""
         assert r.protocol_version == ""
-        assert r.status == "quarantined"
+        assert r.status == "qualified"
         assert r.content_digest is None
 
     def test_roundtrip(self):

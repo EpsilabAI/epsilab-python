@@ -160,9 +160,9 @@ def _browser_login() -> Optional[str]:
     thread.start()
 
     auth_url = f"{_DASHBOARD_URL}?cli_auth={actual_port}"
-    _ok(f"  Opening browser for authentication...")
+    _ok("  Opening browser for authentication...")
     webbrowser.open(auth_url)
-    _ok(f"  Waiting for login (press Ctrl+C to cancel)...\n")
+    _ok("  Waiting for login (press Ctrl+C to cancel)...\n")
 
     try:
         thread.join(timeout=120)
@@ -285,7 +285,7 @@ def cmd_env_list(args: argparse.Namespace) -> None:
     try:
         listings = client.list_environment_listings(limit=args.limit)
         if args.json:
-            _json_out([l.to_dict() for l in listings])
+            _json_out([listing.to_dict() for listing in listings])
         else:
             _ok(f"Your environments ({len(listings)}):\n")
             if not listings:
@@ -294,13 +294,13 @@ def cmd_env_list(args: argparse.Namespace) -> None:
                 _ok(f"  Or browse the marketplace at {_DASHBOARD_URL}\n")
             rows = [
                 {
-                    "id": l.listing_id,
-                    "slug": l.slug,
-                    "title": l.title,
-                    "visibility": l.visibility,
-                    "status": l.moderation_state,
+                    "id": listing.listing_id,
+                    "slug": listing.slug,
+                    "title": listing.title,
+                    "visibility": listing.visibility,
+                    "status": listing.moderation_state,
                 }
-                for l in listings
+                for listing in listings
             ]
             _table(rows, ["id", "slug", "title", "visibility", "status"])
     except EpsilabError as e:
@@ -398,10 +398,11 @@ def cmd_env_create(args: argparse.Namespace) -> None:
                 summary = text("Short description", default="")
 
             visibility = select("Visibility", [
-                {"value": "private", "label": "Private — only you and grantees"},
-                {"value": "unlisted", "label": "Unlisted — accessible via direct link"},
                 {"value": "public", "label": "Public — visible in marketplace"},
-            ], default=visibility or "private")
+                {"value": "shared", "label": "Shared — visible to collaborators"},
+                {"value": "unlisted", "label": "Unlisted — accessible via direct link"},
+                {"value": "private", "label": "Private — only you"},
+            ], default=visibility or "public")
 
         if not namespace_id:
             _err(
@@ -421,7 +422,7 @@ def cmd_env_create(args: argparse.Namespace) -> None:
         _ok(f"  slug: {listing.slug}")
         _ok(f"  title: {listing.title}")
         _ok(f"  visibility: {listing.visibility}")
-        _ok(f"\nNext steps:")
+        _ok("\nNext steps:")
         _ok(f"  epsilab env push --manifest epsilab.json --listing-id {listing.listing_id}")
         _ok(f"\nManage this listing at {_DASHBOARD_URL} (My Environments)")
     except EpsilabError as e:
@@ -596,10 +597,8 @@ def cmd_env_push(args: argparse.Namespace) -> None:
         _ok(f"Release ID: {release.release_id}")
         _ok(f"Status: {release.status}")
 
-        if release.status == "quarantined":
-            _ok("\nThe release is quarantined pending qualification.")
-            _ok("Run a quality report to qualify it:")
-            _ok(f"  epsilab env qualify {release.release_id}")
+        if release.status == "qualified":
+            _ok("\nRelease is live according to the listing's visibility setting.")
         _ok(f"\nView release details at {_DASHBOARD_URL} (My Environments)")
     except EpsilabError as e:
         _err(str(e))
@@ -688,7 +687,7 @@ def cmd_env_status(args: argparse.Namespace) -> None:
 
         badges = client.list_quality_badges(release_id=args.release_id, limit=10)
         if badges:
-            _ok(f"\n  Quality badges:")
+            _ok("\n  Quality badges:")
             for b in badges:
                 _ok(f"    - {b.get('badge_type', '?')} ({b.get('status', '?')})")
         else:
@@ -710,7 +709,7 @@ def cmd_env_qualify(args: argparse.Namespace) -> None:
         _ok(f"Quality report started: {report.get('report_id', '?')}")
         _ok(f"  type: {args.report_type}")
         _ok(f"  status: {report.get('status', 'pending')}")
-        _ok(f"\nCheck progress with:")
+        _ok("\nCheck progress with:")
         _ok(f"  epsilab env status {args.release_id}")
     except EpsilabError as e:
         _err(str(e))
@@ -821,7 +820,7 @@ def cmd_namespace_create(args: argparse.Namespace) -> None:
         ns_id = ns.get("namespace_id", "?")
         _ok(f"\nNamespace created: {ns_id}")
         _ok(f"  slug: {slug}")
-        _ok(f"\nNext step: create a listing in this namespace:")
+        _ok("\nNext step: create a listing in this namespace:")
         _ok(f"  epsilab env create --namespace-id {ns_id} <slug> \"<title>\"")
 
         if is_interactive() and confirm("Create a listing in this namespace now?"):
@@ -829,10 +828,11 @@ def cmd_namespace_create(args: argparse.Namespace) -> None:
             listing_title = text("Listing title", required=True)
             listing_summary = text("Short description", default="")
             visibility = select("Visibility", [
-                {"value": "private", "label": "Private — only you and grantees"},
-                {"value": "unlisted", "label": "Unlisted — accessible via direct link"},
                 {"value": "public", "label": "Public — visible in marketplace"},
-            ], default="private")
+                {"value": "shared", "label": "Shared — visible to collaborators"},
+                {"value": "unlisted", "label": "Unlisted — accessible via direct link"},
+                {"value": "private", "label": "Private — only you"},
+            ], default="public")
 
             listing = client.create_listing(
                 namespace_id=str(ns_id),
@@ -843,7 +843,7 @@ def cmd_namespace_create(args: argparse.Namespace) -> None:
             )
             _ok(f"\nCreated listing: {listing.listing_id}")
             _ok(f"  slug: {listing.slug}")
-            _ok(f"\nReady to push:")
+            _ok("\nReady to push:")
             _ok(f"  epsilab env push --manifest epsilab.json --listing-id {listing.listing_id}")
     except EpsilabError as e:
         _err(str(e))
@@ -861,7 +861,7 @@ def cmd_profile_show(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(profile)
         else:
-            _ok(f"Creator Profile:")
+            _ok("Creator Profile:")
             _ok(f"  name: {profile.get('display_name', '-')}")
             _ok(f"  bio: {profile.get('bio', '-')}")
             _ok(f"  website: {profile.get('website_url', '-')}")
@@ -1006,10 +1006,8 @@ if __name__ == "__main__":
 
 def cmd_env_verify(args: argparse.Namespace) -> None:
     """Run local preflight checks on an environment project before pushing."""
-    import hashlib
     import re
     import subprocess
-    import time
     import urllib.request
 
     target = Path(args.directory or ".")
@@ -1058,7 +1056,7 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
 
                 ref = env_config.get("runtime_ref", "")
                 if ref and not ref.startswith("oci://"):
-                    warnings.append(f"environment.runtime_ref does not start with oci:// — may not be accepted")
+                    warnings.append("environment.runtime_ref does not start with oci:// — may not be accepted")
                 elif ref:
                     passed.append("environment.runtime_ref looks like a valid OCI reference")
 
@@ -1298,13 +1296,13 @@ def cmd_env_init(args: argparse.Namespace) -> None:
     _ok(f"  {target}/server.py      — minimal environment server")
     _ok("")
     _ok("Next steps:")
-    _ok(f"  1. Implement your environment logic in server.py")
-    _ok(f"  2. Build and push your container image")
-    _ok(f"  3. Fill in epsilab.json with image refs and content digests")
+    _ok("  1. Implement your environment logic in server.py")
+    _ok("  2. Build and push your container image")
+    _ok("  3. Fill in epsilab.json with image refs and content digests")
     _ok(f"  4. Create a namespace:  epsilab namespace create {slug}")
     _ok(f"  5. Create a listing:    epsilab env create --namespace-id <ns-id> {slug} \"My Environment\"")
-    _ok(f"  6. Push a release:      epsilab env push --manifest epsilab.json --listing-id <listing-id>")
-    _ok(f"  7. Deploy:              epsilab env deploy --listing-id <listing-id> --release-id <rel-id>")
+    _ok("  6. Push a release:      epsilab env push --manifest epsilab.json --listing-id <listing-id>")
+    _ok("  7. Deploy:              epsilab env deploy --listing-id <listing-id> --release-id <rel-id>")
     _ok("")
     _ok(f"Documentation:  {_DASHBOARD_URL} (Documentation > Quick Start)")
     _ok(f"Dashboard:      {_DASHBOARD_URL} (My Environments)")
@@ -1426,9 +1424,9 @@ def cmd_env_publish(args: argparse.Namespace) -> None:
             _err("listing_id is required.")
 
         result = client.request_publish(listing_id)
-        _ok(f"Publish request submitted for listing: {listing_id}")
-        _ok(f"  status: {result.get('status', 'pending_review')}")
-        _ok(f"\nThe listing will be reviewed by the moderation team.")
+        _ok(f"Listing published: {listing_id}")
+        _ok(f"  status: {result.get('status', 'published')}")
+        _ok("\nThe listing is now publicly available on the hub.")
     except EpsilabError as e:
         _err(str(e))
     finally:
@@ -1608,7 +1606,7 @@ def cmd_env_batch_show(args: argparse.Namespace) -> None:
 
         if args.comparison:
             comp = client.get_batch_comparison(args.batch_id)
-            _ok(f"\nComparison:")
+            _ok("\nComparison:")
             _json_out(comp)
 
         if args.json:
@@ -1878,7 +1876,7 @@ def cmd_run_eval(args: argparse.Namespace) -> None:
             est = client.estimate_evaluation_cost(
                 models=models, domains=domains, max_tasks=args.max_tasks,
             )
-            _ok(f"Cost estimate:")
+            _ok("Cost estimate:")
             _ok(f"  tasks: {est.task_count}")
             _ok(f"  total credits: {est.total_credits}")
             _ok(f"  balance: {est.balance}")
@@ -2241,8 +2239,8 @@ def build_parser() -> argparse.ArgumentParser:
     create_p.add_argument("--summary", help="Short description")
     create_p.add_argument(
         "--visibility",
-        choices=["private", "unlisted", "public"],
-        default="private",
+        choices=["private", "unlisted", "shared", "public"],
+        default="public",
     )
     create_p.set_defaults(func=cmd_env_create)
 
@@ -2293,13 +2291,22 @@ def build_parser() -> argparse.ArgumentParser:
     qualify_p.add_argument("release_id", help="Release ID to qualify")
     qualify_p.add_argument(
         "--report-type",
-        choices=["qualification", "regression", "benchmark"],
-        default="qualification",
+        choices=[
+            "protocol_conformance",
+            "startup_cleanup",
+            "reset_independence",
+            "verifier_repeatability",
+            "adversarial",
+            "contamination",
+            "benchmark",
+            "full_qualification",
+        ],
+        default="full_qualification",
     )
     qualify_p.set_defaults(func=cmd_env_qualify)
 
     # env publish
-    publish_p = env_sub.add_parser("publish", help="Submit listing for marketplace review")
+    publish_p = env_sub.add_parser("publish", help="Publish listing to the environment hub")
     publish_p.add_argument("listing_id", nargs="?", help="Listing ID (prompted if omitted)")
     publish_p.set_defaults(func=cmd_env_publish)
 

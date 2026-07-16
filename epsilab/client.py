@@ -23,6 +23,8 @@ from dotenv import dotenv_values
 
 from .exceptions import ApiError, AuthError, InsufficientCreditsError, RateLimitError
 from .models import (
+    ApplicationTool,
+    ApplicationToolRelease,
     ArtifactSummary,
     CostEstimate,
     CustomTaskUploadResult,
@@ -44,6 +46,18 @@ logger = logging.getLogger("epsilab")
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BACKOFF_BASE = 1.0
+_QUALITY_REPORT_TYPES = frozenset(
+    {
+        "protocol_conformance",
+        "startup_cleanup",
+        "reset_independence",
+        "verifier_repeatability",
+        "adversarial",
+        "contamination",
+        "benchmark",
+        "full_qualification",
+    }
+)
 _DEFAULT_BACKOFF_MAX = 60.0
 
 
@@ -2301,9 +2315,9 @@ class EpsilabClient:
         limit: int = 50,
         offset: int = 0,
     ) -> List["EnvironmentListing"]:
-        """Browse environment listings you have access to.
+        """Browse environment listings on the hub.
 
-        Returns listings you own plus any you have entitlements for.
+        Returns public listings, your own listings, and shared listings you can discover.
 
         Args:
             limit: Max results (1-200, default 50).
@@ -2319,6 +2333,44 @@ class EpsilabClient:
         )
         items = data if isinstance(data, list) else data.get("listings", data.get("items", []))
         return [EnvironmentListing.from_dict(d) for d in items]
+
+    def get_environment_listing(self, listing_id: str) -> "EnvironmentListing":
+        """Get a hub listing by ID, including an unlisted listing reached by direct link."""
+        data = self._request(
+            "GET",
+            f"/v1/environment-listings/{self._path_segment(listing_id)}",
+        )
+        return EnvironmentListing.from_dict(data)
+
+    def list_application_tools(
+        self,
+        *,
+        query: Optional[str] = None,
+        plugin: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List["ApplicationTool"]:
+        """Browse public Application Tools; authentication is optional."""
+        data = self._request(
+            "GET",
+            "/v1/application-tools",
+            params={"q": query, "plugin": plugin, "limit": limit, "offset": offset},
+        )
+        items = data if isinstance(data, list) else data.get("items", [])
+        return [ApplicationTool.from_dict(item) for item in items]
+
+    def get_application_tool(self, tool_id: str) -> "ApplicationTool":
+        """Get a public or unlisted Application Tool by ID."""
+        data = self._request("GET", f"/v1/application-tools/{self._path_segment(tool_id)}")
+        return ApplicationTool.from_dict(data)
+
+    def get_application_tool_release(self, release_id: str) -> "ApplicationToolRelease":
+        """Get the recommended public or unlisted Application Tool release by ID."""
+        data = self._request(
+            "GET",
+            f"/v1/application-tool-releases/{self._path_segment(release_id)}",
+        )
+        return ApplicationToolRelease.from_dict(data)
 
     def list_public_listings(
         self,
@@ -3212,6 +3264,7 @@ class EpsilabClient:
         title: str,
         body: Optional[str] = None,
         usage_hours: Optional[float] = None,
+        privacy_cleared: bool = False,
         idempotency_key: Optional[str] = None,
         listing_owner_tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -3222,7 +3275,8 @@ class EpsilabClient:
             rating: Rating (1-5).
             title: Review title.
             body: Optional review body text.
-            usage_hours: Optional hours of usage to report.
+            usage_hours: Deprecated and ignored. Verified usage is derived by the service.
+            privacy_cleared: Confirm the review contains no private session data.
             idempotency_key: Unique key for at-most-once delivery.
             listing_owner_tenant_id: Deprecated, ignored.
 
@@ -3236,8 +3290,7 @@ class EpsilabClient:
         }
         if body:
             payload["body"] = body
-        if usage_hours is not None:
-            payload["usage_hours"] = usage_hours
+        payload["privacy_cleared"] = privacy_cleared
         headers = {"Idempotency-Key": idempotency_key or self._auto_idem_key()}
         return self._request("POST", "/v1/reviews", json_body=payload, extra_headers=headers)
 
@@ -3277,7 +3330,7 @@ class EpsilabClient:
         Args:
             listing_id: The listing to purchase.
             license_version_id: License version to purchase under.
-            payment_reference: Optional external payment reference.
+            payment_reference: Deprecated and ignored. Payment details are resolved by the service.
             idempotency_key: Unique key for at-most-once delivery.
 
         Returns:
@@ -3287,8 +3340,6 @@ class EpsilabClient:
             "listing_id": listing_id,
             "license_version_id": license_version_id,
         }
-        if payment_reference:
-            payload["payment_reference"] = payment_reference
         headers = {"Idempotency-Key": idempotency_key or self._auto_idem_key()}
         return self._request("POST", "/v1/purchases", json_body=payload, extra_headers=headers)
 
@@ -3378,7 +3429,7 @@ class EpsilabClient:
         slug: str,
         title: str,
         summary: Optional[str] = None,
-        visibility: str = "private",
+        visibility: str = "public",
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentListing":
         """Create an environment listing (creator operation).
@@ -3388,7 +3439,7 @@ class EpsilabClient:
             slug: URL-safe listing slug.
             title: Listing title.
             summary: Short description.
-            visibility: ``private``, ``unlisted``, or ``public``.
+            visibility: ``private``, ``unlisted``, ``shared``, or ``public``.
             idempotency_key: Unique key for at-most-once delivery.
 
         Returns:
@@ -3408,6 +3459,100 @@ class EpsilabClient:
             extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
         )
         return EnvironmentListing.from_dict(data)
+
+    def create_application_tool(
+        self,
+        *,
+        namespace_id: str,
+        slug: str,
+        title: str,
+        category: str,
+        summary: str = "",
+        tags: Optional[List[str]] = None,
+        visibility: str = "public",
+        idempotency_key: Optional[str] = None,
+    ) -> "ApplicationTool":
+        """Create an Application Tool listing."""
+        data = self._request(
+            "POST",
+            "/v1/application-tools",
+            json_body={
+                "namespace_id": namespace_id,
+                "slug": slug,
+                "title": title,
+                "summary": summary,
+                "category": category,
+                "tags": tags or [],
+                "visibility": visibility,
+            },
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
+        return ApplicationTool.from_dict(data)
+
+    def create_application_tool_release(
+        self,
+        *,
+        tool_id: str,
+        release_version: str,
+        artifact_ref: str,
+        artifact_digest: str,
+        appsuite_version: str,
+        plugin_names: List[str],
+        seed_schema_digest: str,
+        interface_schema_digest: str,
+        license_id: str,
+        manifest: Dict[str, Any],
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Publish an immutable Application Tool release."""
+        return self._request(
+            "POST",
+            "/v1/application-tool-releases",
+            json_body={
+                "tool_id": tool_id,
+                "release_version": release_version,
+                "artifact_ref": artifact_ref,
+                "artifact_digest": artifact_digest,
+                "appsuite_version": appsuite_version,
+                "plugin_names": plugin_names,
+                "seed_schema_digest": seed_schema_digest,
+                "interface_schema_digest": interface_schema_digest,
+                "license_id": license_id,
+                "manifest": manifest,
+            },
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
+
+    def update_application_tool(
+        self,
+        tool_id: str,
+        *,
+        expected_revision: int,
+        title: Optional[str] = None,
+        summary: Optional[str] = None,
+        category: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        visibility: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> "ApplicationTool":
+        """Update mutable Application Tool metadata."""
+        body: Dict[str, Any] = {"expected_revision": expected_revision}
+        for key, value in {
+            "title": title,
+            "summary": summary,
+            "category": category,
+            "tags": tags,
+            "visibility": visibility,
+        }.items():
+            if value is not None:
+                body[key] = value
+        data = self._request(
+            "PATCH",
+            f"/v1/application-tools/{self._path_segment(tool_id)}",
+            json_body=body,
+            extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
+        )
+        return ApplicationTool.from_dict(data)
 
     def update_listing(
         self,
@@ -3722,8 +3867,10 @@ class EpsilabClient:
 
         Args:
             release_id: Release to evaluate.
-            report_type: Type of quality check (``qualification``,
-                ``regression``, ``benchmark``).
+            report_type: One of ``protocol_conformance``, ``startup_cleanup``,
+                ``reset_independence``, ``verifier_repeatability``,
+                ``adversarial``, ``contamination``, ``benchmark``, or
+                ``full_qualification``.
             deployment_id: Optional deployment to test against.
             config: Optional report configuration.
             idempotency_key: Unique key for at-most-once delivery.
@@ -3731,6 +3878,9 @@ class EpsilabClient:
         Returns:
             The created quality report record.
         """
+        if report_type not in _QUALITY_REPORT_TYPES:
+            allowed = ", ".join(sorted(_QUALITY_REPORT_TYPES))
+            raise ValueError(f"report_type must be one of: {allowed}")
         body: Dict[str, Any] = {
             "release_id": release_id,
             "report_type": report_type,
@@ -3857,7 +4007,7 @@ class EpsilabClient:
         *,
         idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Request moderation review to publish a listing (creator operation).
+        """Publish a listing on the environment hub (creator operation).
 
         Args:
             listing_id: The listing to submit for review.

@@ -20,6 +20,8 @@ from epsilab.exceptions import (
     RateLimitError,
 )
 from epsilab.models import (
+    ApplicationTool,
+    ApplicationToolRelease,
     CostEstimate,
     EnvironmentListing,
     EnvironmentRelease,
@@ -1906,7 +1908,7 @@ class TestGetMatrixScores:
             return _json_response({"scores": [], "total": 0})
 
         client = _make_client(httpx.MockTransport(capture))
-        result = client.get_matrix_scores(domain="math", limit=100, offset=50)
+        client.get_matrix_scores(domain="math", limit=100, offset=50)
         assert captured["method"] == "GET"
         assert captured["path"] == "/v1/matrix/scores"
         assert captured["params"]["domain"] == "math"
@@ -1943,7 +1945,7 @@ class TestGetMatrixInsights:
             return _json_response({"rankings": [], "recommendations": []})
 
         client = _make_client(httpx.MockTransport(capture))
-        result = client.get_matrix_insights(model_id="openai/gpt-4o", refresh=True)
+        client.get_matrix_insights(model_id="openai/gpt-4o", refresh=True)
         assert captured["method"] == "GET"
         assert captured["path"] == "/v1/matrix/insights"
         assert captured["params"]["model_id"] == "openai/gpt-4o"
@@ -1961,7 +1963,7 @@ class TestGetMatrixCoverage:
             return _json_response({"coverage": {}})
 
         client = _make_client(httpx.MockTransport(capture))
-        result = client.get_matrix_coverage(
+        client.get_matrix_coverage(
             domain="coding", models=["openai/gpt-4o", "google/gemini-2.5-flash"]
         )
         assert captured["method"] == "GET"
@@ -2018,13 +2020,17 @@ class TestListEnvironmentListings:
             captured["method"] = req.method
             captured["path"] = req.url.path
             captured["params"] = dict(req.url.params)
+            captured["authorization"] = req.headers.get("Authorization")
             return _json_response(
                 [
                     {
                         "listing_id": "lst-1",
-                        "namespace_id": "ns-1",
+                        "namespace": "community",
                         "slug": "my-env",
                         "title": "My Env",
+                        "listing_revision": 2,
+                        "is_owner": False,
+                        "release_id": "rel-1",
                     }
                 ]
             )
@@ -2039,6 +2045,110 @@ class TestListEnvironmentListings:
         assert isinstance(result[0], EnvironmentListing)
         assert result[0].listing_id == "lst-1"
         assert result[0].slug == "my-env"
+        assert result[0].namespace == "community"
+        assert result[0].revision == 2
+        assert result[0].release_id == "rel-1"
+        assert captured["authorization"] is None
+
+    def test_get_direct_listing(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["path"] = req.url.path
+            return _json_response(
+                {
+                    "listing_id": "lst-unlisted",
+                    "namespace": "team",
+                    "slug": "preview",
+                    "title": "Preview",
+                    "visibility": "unlisted",
+                    "is_owner": False,
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        listing = client.get_environment_listing("lst-unlisted")
+        assert captured["path"] == "/v1/environment-listings/lst-unlisted"
+        assert listing.visibility == "unlisted"
+
+
+class TestApplicationTools:
+    def test_discovery_and_release(self):
+        def capture(req: httpx.Request) -> httpx.Response:
+            if req.url.path == "/v1/application-tools":
+                assert req.url.params["q"] == "engineering"
+                return _json_response(
+                    [
+                        {
+                            "tool_id": "tool-1",
+                            "namespace_id": "ns-1",
+                            "slug": "workspace",
+                            "title": "Workspace",
+                            "category": "engineering",
+                        }
+                    ]
+                )
+            if req.url.path == "/v1/application-tool-releases/rel-1":
+                return _json_response(
+                    {
+                        "release_id": "rel-1",
+                        "tool_id": "tool-1",
+                        "release_version": "1.0.0",
+                        "content_digest": "sha256:content",
+                        "qualification_state": "qualified",
+                        "artifact_digest": "sha256:artifact",
+                        "appsuite_version": "0.1.0",
+                        "plugin_names": ["github"],
+                        "seed_schema_digest": "sha256:seed",
+                        "interface_schema_digest": "sha256:interface",
+                        "license_id": "apache-2.0",
+                        "manifest": {},
+                    }
+                )
+            return _json_response({}, status=404)
+
+        client = _make_client(httpx.MockTransport(capture))
+        tools = client.list_application_tools(query="engineering")
+        release = client.get_application_tool_release("rel-1")
+        assert isinstance(tools[0], ApplicationTool)
+        assert isinstance(release, ApplicationToolRelease)
+
+    def test_create_defaults_public_and_update(self):
+        requests = []
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            body = json.loads(req.content)
+            requests.append((req.method, req.url.path, body))
+            return _json_response(
+                {
+                    "tool_id": "tool-1",
+                    "namespace_id": "ns-1",
+                    "slug": "workspace",
+                    "title": body.get("title", "Workspace"),
+                    "summary": body.get("summary", ""),
+                    "category": body.get("category", "engineering"),
+                    "tags": body.get("tags", []),
+                    "visibility": body.get("visibility", "public"),
+                    "revision": 2,
+                },
+                status=201 if req.method == "POST" else 200,
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        created = client.create_application_tool(
+            namespace_id="ns-1",
+            slug="workspace",
+            title="Workspace",
+            category="engineering",
+        )
+        updated = client.update_application_tool(
+            "tool-1",
+            expected_revision=1,
+            visibility="unlisted",
+        )
+        assert requests[0][2]["visibility"] == "public"
+        assert created.visibility == "public"
+        assert updated.visibility == "unlisted"
 
 
 class TestListPublicListings:
@@ -2054,7 +2164,7 @@ class TestListPublicListings:
         client = _make_client(httpx.MockTransport(capture))
         result = client.list_public_listings(query="coding", sort_by="popular")
         assert captured["method"] == "GET"
-        assert captured["path"] == "/public/listings"
+        assert captured["path"] == "/v1/public/listings"
         assert captured["params"]["query"] == "coding"
         assert captured["params"]["sort_by"] == "popular"
         assert result[0]["title"] == "Public Env"
@@ -2414,12 +2524,12 @@ class TestListQualityReports:
 
         client = _make_client(httpx.MockTransport(capture))
         result = client.list_quality_reports(
-            release_id="rel-1", report_type="qualification"
+            release_id="rel-1", report_type="full_qualification"
         )
         assert captured["method"] == "GET"
         assert captured["path"] == "/v1/environment-quality-reports"
         assert captured["params"]["release_id"] == "rel-1"
-        assert captured["params"]["report_type"] == "qualification"
+        assert captured["params"]["report_type"] == "full_qualification"
         assert result[0]["report_id"] == "rpt-1"
 
 
@@ -2495,10 +2605,14 @@ class TestCreateReview:
             listing_owner_tenant_id="tenant-creator",
             rating=5,
             title="Excellent environment",
+            usage_hours=12.5,
+            privacy_cleared=True,
         )
         assert captured["method"] == "POST"
-        assert captured["path"] == "/reviews"
+        assert captured["path"] == "/v1/reviews"
         assert captured["body"]["rating"] == 5
+        assert captured["body"]["privacy_cleared"] is True
+        assert "usage_hours" not in captured["body"]
         assert result["review_id"] == "rev-1"
 
 
@@ -2515,12 +2629,13 @@ class TestCreatePurchase:
         client = _make_client(httpx.MockTransport(capture))
         result = client.create_purchase(
             listing_id="lst-1",
-            listing_owner_tenant_id="tenant-creator",
-            amount_cents=9900,
+            license_version_id="license-v1",
+            payment_reference="legacy-reference",
         )
         assert captured["method"] == "POST"
-        assert captured["path"] == "/purchases"
-        assert captured["body"]["amount_cents"] == 9900
+        assert captured["path"] == "/v1/purchases"
+        assert captured["body"]["license_version_id"] == "license-v1"
+        assert "payment_reference" not in captured["body"]
         assert result["purchase_id"] == "pur-1"
 
 
@@ -2568,6 +2683,7 @@ class TestCreateListing:
         )
         assert captured["method"] == "POST"
         assert captured["path"] == "/v1/environment-listings"
+        assert captured["body"]["visibility"] == "public"
         assert isinstance(result, EnvironmentListing)
         assert result.listing_id == "lst-new"
 
@@ -2639,7 +2755,7 @@ class TestCreateEnvironmentRelease:
                     "listing_id": "lst-1",
                     "release_version": "1.0.0",
                     "protocol_version": "0.4.1",
-                    "status": "quarantined",
+                    "qualification_state": "qualified",
                 },
                 status=201,
             )
@@ -2660,6 +2776,7 @@ class TestCreateEnvironmentRelease:
         assert captured["path"] == "/v1/environment-releases"
         assert isinstance(result, EnvironmentRelease)
         assert result.release_id == "rel-new"
+        assert result.status == "qualified"
 
 
 class TestGetCreatorAggregates:
@@ -2695,7 +2812,7 @@ class TestCreatorProfile:
             display_name="AI Labs", bio="We build RL environments"
         )
         assert captured["method"] == "POST"
-        assert captured["path"] == "/creator-profiles"
+        assert captured["path"] == "/v1/creator-profiles"
         assert captured["body"]["display_name"] == "AI Labs"
         assert result["display_name"] == "AI Labs"
 
@@ -2719,7 +2836,7 @@ class TestCreatorProfile:
             return _json_response({"profile_id": "prof-1", "is_public": True})
 
         client = _make_client(httpx.MockTransport(capture))
-        result = client.update_creator_profile(is_public=True)
+        client.update_creator_profile(is_public=True)
         assert captured["method"] == "PATCH"
         assert captured["body"]["is_public"] is True
 
@@ -2777,7 +2894,7 @@ class TestListAdapters:
         client = _make_client(httpx.MockTransport(capture))
         result = client.list_adapters(protocol_family="gymnasium")
         assert captured["method"] == "GET"
-        assert captured["path"] == "/adapters"
+        assert captured["path"] == "/v1/adapters"
         assert captured["params"]["protocol_family"] == "gymnasium"
         assert result[0]["adapter_id"] == "adp-1"
 
@@ -2794,7 +2911,7 @@ class TestGetAdapter:
 
         client = _make_client(httpx.MockTransport(capture))
         result = client.get_adapter("adp-1")
-        assert captured["path"] == "/adapters/adp-1"
+        assert captured["path"] == "/v1/adapters/adp-1"
         assert result["name"] == "Gymnasium Adapter"
 
 
@@ -2809,7 +2926,7 @@ class TestCheckAdapterEquivalence:
 
         client = _make_client(httpx.MockTransport(capture))
         result = client.check_adapter_equivalence("adp-1", "ver-1")
-        assert captured["path"] == "/adapters/adp-1/equivalence/check"
+        assert captured["path"] == "/v1/adapters/adp-1/equivalence/check"
         assert captured["params"]["version_id"] == "ver-1"
         assert result["equivalent"] is True
 
@@ -2899,7 +3016,7 @@ class TestGetBatchComparison:
             return _json_response({"comparison": {"mean_reward": 0.72}})
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.get_batch_comparison("bat-1")
+        client.get_batch_comparison("bat-1")
         assert "/bat-1/comparison" in captured["path"]
 
 
@@ -2946,7 +3063,7 @@ class TestGetQualityReport:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.get_quality_report("rpt-1")
+        client.get_quality_report("rpt-1")
         assert "/v1/environment-quality-reports/rpt-1" in captured["path"]
 
 
@@ -3030,7 +3147,7 @@ class TestGetLicenseVersion:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.get_license_version("lv-1")
+        client.get_license_version("lv-1")
         assert "/lv-1" in captured["path"]
 
 
@@ -3045,7 +3162,7 @@ class TestListChargeAdjustments:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_charge_adjustments(charge_id="chg-1")
+        client.list_charge_adjustments(charge_id="chg-1")
         assert "charge_id=chg-1" in captured["query"]
 
 
@@ -3076,7 +3193,7 @@ class TestGetInvoiceLineItems:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.get_invoice_line_items("inv-1")
+        client.get_invoice_line_items("inv-1")
         assert "/inv-1/line-items" in captured["path"]
 
 
@@ -3125,7 +3242,7 @@ class TestMarkNotificationRead:
             return _json_response({"notification_id": "n1", "read": True})
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.mark_notification_read("n1")
+        client.mark_notification_read("n1")
         assert captured["method"] == "POST"
         assert "/n1/read" in captured["path"]
 
@@ -3143,7 +3260,7 @@ class TestCreateDeploymentRevision:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.create_deployment_revision(
+        client.create_deployment_revision(
             "dep-1",
             environment_release_id="rel-2",
             export_policy="full",
@@ -3165,14 +3282,22 @@ class TestCreateQualityReport:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.create_quality_report(
+        client.create_quality_report(
             release_id="rel-1",
-            report_type="qualification",
+            report_type="full_qualification",
             deployment_id="dep-1",
         )
         assert captured["body"]["release_id"] == "rel-1"
-        assert captured["body"]["report_type"] == "qualification"
+        assert captured["body"]["report_type"] == "full_qualification"
         assert captured["body"]["deployment_id"] == "dep-1"
+
+    def test_rejects_unsupported_report_type_before_request(self):
+        client = _make_client(httpx.MockTransport(lambda request: pytest.fail("unexpected request")))
+        with pytest.raises(ValueError, match="report_type must be one of"):
+            client.create_quality_report(
+                release_id="rel-1",
+                report_type="qualification",
+            )
 
 
 class TestCreateTaskPackRelease:
@@ -3264,7 +3389,7 @@ class TestCreateChangelog:
             return _json_response({"changelog_id": "cl-1"}, status=201)
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.create_changelog(
+        client.create_changelog(
             release_id="rel-1",
             version_label="1.2.0",
             summary="Added new tasks",
@@ -3292,7 +3417,7 @@ class TestListChangelogs:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_changelogs("rel-1", limit=10)
+        client.list_changelogs("rel-1", limit=10)
         assert "/rel-1" in captured["path"]
         assert "limit=10" in captured["query"]
 
@@ -3324,7 +3449,7 @@ class TestListRoyaltyRules:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_royalty_rules()
+        client.list_royalty_rules()
         assert "/v1/creator-royalty-rules" in captured["path"]
 
 
@@ -3337,7 +3462,7 @@ class TestListSettlementAdjustments:
             return _json_response([{"adjustment_id": "adj-1"}])
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_settlement_adjustments()
+        client.list_settlement_adjustments()
         assert "/v1/creator-adjustments" in captured["path"]
 
 
@@ -3350,7 +3475,7 @@ class TestListPayoutBatches:
             return _json_response([{"payout_id": "po-1", "status": "completed"}])
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_payout_batches()
+        client.list_payout_batches()
         assert "/v1/creator-payout-batches" in captured["path"]
 
 
@@ -3365,7 +3490,7 @@ class TestListCreatorStatements:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_creator_statements()
+        client.list_creator_statements()
         assert "/v1/creator-statements" in captured["path"]
 
 
@@ -3381,7 +3506,7 @@ class TestListAdapterVersions:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_adapter_versions("adp-1", status="active")
+        client.list_adapter_versions("adp-1", status="active")
         assert "/adp-1/versions" in captured["path"]
         assert "status=active" in captured["query"]
 
@@ -3416,7 +3541,7 @@ class TestReportAdapterUsage:
             return _json_response({"ok": True})
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.report_adapter_usage(
+        client.report_adapter_usage(
             "adp-1",
             version_id="v1",
             event_type="session_start",
@@ -3439,7 +3564,7 @@ class TestListBatches:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_batches(deployment_id="dep-1", status="completed")
+        client.list_batches(deployment_id="dep-1", status="completed")
         assert "deployment_id=dep-1" in captured["query"]
         assert "status=completed" in captured["query"]
 
@@ -3453,7 +3578,7 @@ class TestListDisputesFilters:
             return _json_response([{"dispute_id": "dis-1"}])
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_disputes(release_id="rel-1", status="open")
+        client.list_disputes(release_id="rel-1", status="open")
         assert "release_id=rel-1" in captured["query"]
         assert "status=open" in captured["query"]
 
@@ -3469,7 +3594,7 @@ class TestRequestPublish:
             return _json_response({"request_id": "pr-1", "status": "pending"})
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.request_publish("lst-1")
+        client.request_publish("lst-1")
         assert captured["method"] == "POST"
         assert "/moderation/publish-request" in captured["path"]
         assert captured["body"]["listing_id"] == "lst-1"
@@ -3486,7 +3611,7 @@ class TestListAccruals:
             )
 
         client = _make_client(httpx.MockTransport(handler))
-        result = client.list_accruals(status="pending")
+        client.list_accruals(status="pending")
         assert "status=pending" in captured["query"]
 
 
@@ -3575,8 +3700,7 @@ class TestAllMarketplacePathsUseV1OrKnownPrefix:
         client.list_reviews("l1")
         client.create_purchase(
             listing_id="l",
-            listing_owner_tenant_id="t",
-            amount_cents=100,
+            license_version_id="license-v1",
         )
         client.list_purchases()
         client.create_namespace(slug="ns", display_name="NS")

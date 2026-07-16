@@ -570,8 +570,8 @@ class EnvironmentListing:
         slug: URL-safe listing slug.
         title: Human-readable title.
         summary: Short description.
-        visibility: ``private``, ``unlisted``, or ``public``.
-        moderation_state: ``pending``, ``approved``, or ``suspended``.
+        visibility: ``private``, ``unlisted``, ``shared``, or ``public``.
+        moderation_state: ``draft``, ``approved``, ``suspended``, or ``revoked``.
         recommended_release_id: Currently recommended release, if any.
         created_at: ISO-8601 creation timestamp.
         updated_at: ISO-8601 last-update timestamp.
@@ -582,11 +582,23 @@ class EnvironmentListing:
     slug: str
     title: str
     summary: str = ""
-    visibility: str = "private"
-    moderation_state: str = "pending"
+    visibility: str = "public"
+    moderation_state: str = "approved"
     recommended_release_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    namespace: Optional[str] = None
+    revision: int = 1
+    is_owner: bool = False
+    release_id: Optional[str] = None
+    release_version: Optional[str] = None
+    qualification_state: Optional[str] = None
+    deployment_id: Optional[str] = None
+    deployment_alias: Optional[str] = None
+    allowed_split: Optional[str] = None
+    network_policy: Optional[str] = None
+    trace_policy: Optional[str] = None
+    export_policy: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -602,11 +614,119 @@ class EnvironmentListing:
             slug=data.get("slug", ""),
             title=data.get("title", ""),
             summary=data.get("summary", ""),
-            visibility=data.get("visibility", "private"),
-            moderation_state=data.get("moderation_state", "pending"),
+            visibility=data.get("visibility", "public"),
+            moderation_state=data.get("moderation_state", "approved"),
             recommended_release_id=_opt_str(data.get("recommended_release_id")),
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
+            namespace=data.get("namespace"),
+            revision=int(data.get("listing_revision", data.get("revision", 1))),
+            is_owner=bool(data.get("is_owner", False)),
+            release_id=_opt_str(data.get("release_id")),
+            release_version=data.get("release_version"),
+            qualification_state=data.get("qualification_state"),
+            deployment_id=_opt_str(data.get("deployment_id")),
+            deployment_alias=data.get("deployment_alias"),
+            allowed_split=data.get("allowed_split"),
+            network_policy=data.get("network_policy"),
+            trace_policy=data.get("trace_policy"),
+            export_policy=data.get("export_policy"),
+        )
+
+
+@dataclass
+class ApplicationTool:
+    """A reusable, versioned AppSuite tool listed on the environment hub."""
+
+    tool_id: str
+    namespace_id: str
+    slug: str
+    title: str
+    category: str
+    summary: str = ""
+    tags: List[str] = field(default_factory=list)
+    visibility: str = "public"
+    moderation_state: str = "approved"
+    recommended_release_id: Optional[str] = None
+    revision: int = 1
+    namespace: Optional[str] = None
+    release_version: Optional[str] = None
+    qualification_state: Optional[str] = None
+    appsuite_version: Optional[str] = None
+    plugin_names: List[str] = field(default_factory=list)
+    license_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ApplicationTool":
+        return cls(
+            tool_id=str(data["tool_id"]),
+            namespace_id=str(data.get("namespace_id", "")),
+            namespace=data.get("namespace"),
+            slug=data.get("slug", ""),
+            title=data.get("title", ""),
+            summary=data.get("summary", ""),
+            category=data.get("category", ""),
+            tags=list(data.get("tags") or []),
+            visibility=data.get("visibility", "public"),
+            moderation_state=data.get("moderation_state", "approved"),
+            recommended_release_id=_opt_str(data.get("recommended_release_id")),
+            revision=int(data.get("revision", 1)),
+            release_version=data.get("release_version"),
+            qualification_state=data.get("qualification_state"),
+            appsuite_version=data.get("appsuite_version"),
+            plugin_names=list(data.get("plugin_names") or []),
+            license_id=data.get("license_id"),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+        )
+
+
+@dataclass
+class ApplicationToolRelease:
+    """An immutable Application Tool release."""
+
+    release_id: str
+    tool_id: str
+    release_version: str
+    content_digest: str
+    qualification_state: str
+    artifact_digest: str
+    appsuite_version: str
+    plugin_names: List[str]
+    seed_schema_digest: str
+    interface_schema_digest: str
+    license_id: str
+    manifest: Dict[str, Any] = field(default_factory=dict)
+    created_at: Optional[str] = None
+    qualified_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ApplicationToolRelease":
+        return cls(
+            release_id=str(data["release_id"]),
+            tool_id=str(data["tool_id"]),
+            release_version=data.get("release_version", ""),
+            content_digest=data.get("content_digest", ""),
+            qualification_state=data.get("qualification_state", "qualified"),
+            artifact_digest=data.get("artifact_digest", ""),
+            appsuite_version=data.get("appsuite_version", ""),
+            plugin_names=list(data.get("plugin_names") or []),
+            seed_schema_digest=data.get("seed_schema_digest", ""),
+            interface_schema_digest=data.get("interface_schema_digest", ""),
+            license_id=data.get("license_id", ""),
+            manifest=dict(data.get("manifest") or {}),
+            created_at=data.get("created_at"),
+            qualified_at=data.get("qualified_at"),
+            revoked_at=data.get("revoked_at"),
         )
 
 
@@ -616,30 +736,36 @@ class EnvironmentSession:
 
     Attributes:
         session_id: Unique session identifier.
-        deployment_id: Deployment this session runs on.
+        deployment_revision_id: Immutable deployment revision used by the session.
         task_id: Task being executed.
         status: ``provisioning``, ``active``, ``completed``, ``failed``,
             ``cancelled``, or ``truncated``.
         session_token: Bearer token for step requests (only on create).
         session_token_expires_at: Token expiry timestamp.
         observation: Current observation (available after provisioning).
-        reward: Cumulative reward so far.
+        total_reward: Cumulative reward so far.
         steps_taken: Number of steps completed.
         seed: Reproducibility seed, if provided.
         created_at: ISO-8601 creation timestamp.
     """
 
     session_id: str
-    deployment_id: str
     task_id: str
     status: str
+    deployment_revision_id: Optional[str] = None
+    env_type: Optional[str] = None
+    reward_mode: Optional[str] = None
     session_token: Optional[str] = None
     session_token_expires_at: Optional[str] = None
     observation: Optional[str] = None
-    reward: Optional[float] = None
+    total_reward: Optional[float] = None
+    terminal_reason: Optional[str] = None
     steps_taken: int = 0
     seed: Optional[int] = None
+    protocol_version: Optional[str] = None
     created_at: Optional[str] = None
+    provisioned_at: Optional[str] = None
+    closed_at: Optional[str] = None
 
     @property
     def is_active(self) -> bool:
@@ -649,7 +775,12 @@ class EnvironmentSession:
     @property
     def is_terminal(self) -> bool:
         """Whether the session has ended."""
-        return self.status in ("completed", "failed", "cancelled", "truncated")
+        return self.status in ("completed", "failed", "closed", "cancelled", "truncated")
+
+    @property
+    def reward(self) -> Optional[float]:
+        """Backward-compatible alias for :attr:`total_reward`."""
+        return self.total_reward
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -661,16 +792,26 @@ class EnvironmentSession:
     def from_dict(cls, data: Dict[str, Any]) -> "EnvironmentSession":
         return cls(
             session_id=str(data["session_id"]),
-            deployment_id=str(data.get("deployment_id", "")),
             task_id=data.get("task_id", ""),
             status=data.get("status", "provisioning"),
+            deployment_revision_id=(
+                str(data["deployment_revision_id"])
+                if data.get("deployment_revision_id") is not None
+                else None
+            ),
+            env_type=data.get("env_type"),
+            reward_mode=data.get("reward_mode"),
             session_token=data.get("session_token"),
             session_token_expires_at=data.get("session_token_expires_at"),
             observation=data.get("observation"),
-            reward=data.get("reward"),
+            total_reward=data.get("total_reward", data.get("reward")),
+            terminal_reason=data.get("terminal_reason"),
             steps_taken=data.get("steps_taken", 0),
             seed=data.get("seed"),
+            protocol_version=data.get("protocol_version"),
             created_at=data.get("created_at"),
+            provisioned_at=data.get("provisioned_at"),
+            closed_at=data.get("closed_at"),
         )
 
 
@@ -723,7 +864,7 @@ class EnvironmentRelease:
         listing_id: Parent listing.
         release_version: Semantic version string.
         protocol_version: Protocol version (e.g. ``0.4.1``).
-        status: ``quarantined``, ``qualified``, or ``revoked``.
+        status: ``qualified``, ``revoked``, or ``draft``.
         content_digest: Content-addressed SHA-256 digest.
         created_at: ISO-8601 creation timestamp.
     """
@@ -732,7 +873,7 @@ class EnvironmentRelease:
     listing_id: str
     release_version: str
     protocol_version: str
-    status: str = "quarantined"
+    status: str = "qualified"
     content_digest: Optional[str] = None
     created_at: Optional[str] = None
 
@@ -746,7 +887,7 @@ class EnvironmentRelease:
             listing_id=str(data.get("listing_id", "")),
             release_version=data.get("release_version", ""),
             protocol_version=data.get("protocol_version", ""),
-            status=data.get("status", "quarantined"),
+            status=data.get("status", data.get("qualification_state", "qualified")),
             content_digest=data.get("content_digest"),
             created_at=data.get("created_at"),
         )
