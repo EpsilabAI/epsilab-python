@@ -2469,6 +2469,45 @@ class EpsilabClient:
         )
         return EnvironmentRelease.from_dict(data)
 
+    # ── Image upload ──────────────────────────────────────────────────
+
+    def upload_image(self, tarball_path: str, *, tag: str) -> Dict[str, Any]:
+        """Upload a Docker image tarball to the platform.
+
+        The platform receives, validates, and stores the image.
+        No external credentials are required.
+
+        Args:
+            tarball_path: Path to a ``docker save`` tarball (``.tar``).
+            tag: Image tag (e.g. ``my-env:0.1.0``).
+
+        Returns:
+            Dict with ``image_ref``, ``content_digest``, and ``size_bytes``.
+        """
+        import pathlib
+
+        path = pathlib.Path(tarball_path)
+        if not path.exists():
+            raise ApiError(0, f"Tarball not found: {tarball_path}")
+
+        t0 = time.monotonic()
+        _request_logger.debug("POST /v1/environment-images (uploading %s)", path.name)
+
+        with open(path, "rb") as f:
+            resp = self._client.post(
+                "/v1/environment-images",
+                files={"image": (path.name, f, "application/x-tar")},
+                params={"tag": tag},
+                timeout=httpx.Timeout(1800.0, connect=30.0),
+            )
+
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        _request_logger.debug(
+            "POST /v1/environment-images -> %d (%dms)", resp.status_code, elapsed_ms
+        )
+        self._check_response_errors(resp)
+        return resp.json()
+
     # ── Hosted sessions ──────────────────────────────────────────────
 
     def create_environment_session(
@@ -3404,10 +3443,10 @@ class EpsilabClient:
     # ── Platform config ────────────────────────────────────────────────
 
     def get_platform_config(self) -> Dict[str, Any]:
-        """Fetch platform configuration (container registry, API version, etc.)."""
+        """Fetch platform configuration (image upload support, API version, etc.)."""
         return self._request("GET", "/v1/platform/config")
 
-    # ── Creator: registry & publishing ───────────────────────────────
+    # ── Creator: publishing ─────────────────────────────────────────
 
     def create_namespace(
         self,

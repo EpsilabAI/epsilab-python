@@ -87,6 +87,71 @@ epsilab env search "coding environments" --domain coding --min-quality 0.8
 
 All commands support `--json` for machine-readable output where applicable. Credentials are stored in `~/.epsilab/credentials.json` (mode 600).
 
+## Creating an Environment
+
+An RL environment is a containerized task server. At minimum it needs:
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Builds the runtime container image |
+| `server.py` | HTTP server implementing the environment protocol |
+| `tasks.json` | JSON array defining the task set |
+
+### Environment Protocol
+
+Your server must expose two HTTP endpoints:
+
+```
+POST /reset   -> {"observation": str}
+POST /step    -> {"observation": str, "reward": float, "terminated": bool, "truncated": bool}
+```
+
+The `/reset` endpoint receives `{"task_id": "...", "seed": 42}` and returns the initial observation. The `/step` endpoint receives `{"action": "..."}` and returns the step result.
+
+### tasks.json Format
+
+Each task needs at minimum a `task_id` and a `prompt`:
+
+```json
+[
+  {
+    "task_id": "find-the-bug-001",
+    "prompt": "Find and fix the bug in the following code...",
+    "difficulty": "easy",
+    "split": "train",
+    "max_steps": 10
+  }
+]
+```
+
+### Scaffold and Deploy
+
+```bash
+epsilab env init my-environment    # generates Dockerfile, server.py, tasks.json
+cd my-environment
+# ... implement your logic ...
+epsilab deploy                     # builds, uploads, and registers (one command)
+```
+
+The `deploy` command builds the Docker image locally, uploads it through the API (you never need registry credentials), and registers the release.
+
+## Creating an Application Tool
+
+Application tools are reusable plugins (e.g. GitHub, Slack, Calendar) that environments can compose together. A tool needs:
+
+| File | Purpose |
+|------|---------|
+| `plugin.py` | `AppPlugin` subclass defining the tool's identity and lifecycle |
+| `api.py` | API route handlers (FastAPI-style) |
+| `state.py` | Deterministic state model for the tool |
+
+### Deploy a Tool
+
+```bash
+cd my-tool/
+epsilab deploy    # auto-detects tool structure, builds wheel, uploads
+```
+
 ## Quick Start: Running an Environment
 
 ```python
@@ -129,12 +194,26 @@ export = client.create_environment_export(deployment_id="deployment-id", format=
 
 ## Quick Start: Publishing an Environment
 
+The fastest way to publish is a single command:
+
+```bash
+cd my-environment/
+epsilab deploy
+```
+
+This builds the Docker image locally, uploads it through the platform API (no registry credentials needed), creates the listing and release, and registers all tasks from `tasks.json`.
+
+For programmatic control, use the Python client:
+
 ```python
 from epsilab import Epsilab
 
 client = Epsilab(api_key="sk-...")
 
-# Create a namespace and listing
+# Upload the image through the API (no external credentials needed)
+result = client.upload_image("my-env.tar", tag="code-sandbox:1.0.0")
+
+# Create a namespace, listing, and release
 ns = client.create_namespace(slug="my-org", display_name="My Org")
 listing = client.create_listing(
     namespace_id=ns["namespace_id"],
@@ -143,36 +222,12 @@ listing = client.create_listing(
     summary="Sandboxed Python code execution environment",
 )
 
-# Register releases (task pack, verifier, environment)
-tp = client.create_task_pack_release(
-    namespace_id=ns["namespace_id"],
-    name="python-tasks",
-    release_version="1.0.0",
-    artifact_ref="ghcr.io/my-org/tasks:1.0.0",
-    artifact_digest="sha256:...",
-    usage_policy="open",
-    license_id="apache-2.0",
-)
-
-ver = client.create_verifier_release(
-    namespace_id=ns["namespace_id"],
-    name="pytest-verifier",
-    release_version="1.0.0",
-    runtime_ref="ghcr.io/my-org/verifier:1.0.0",
-    runtime_digest="sha256:...",
-    source_digest="sha256:...",
-    evidence_schema_digest="sha256:...",
-    reward_mode="partial_credit",
-)
-
 release = client.create_environment_release(
     listing_id=listing.listing_id,
     release_version="1.0.0",
     protocol_version="0.4.1",
-    runtime_ref="ghcr.io/my-org/env:1.0.0",
-    runtime_digest="sha256:...",
-    task_pack_release_id=tp["release_id"],
-    verifier_release_id=ver["release_id"],
+    runtime_ref=result["image_ref"],
+    runtime_digest=result["content_digest"],
     action_schema_digest="sha256:...",
     observation_schema_digest="sha256:...",
 )
@@ -183,15 +238,6 @@ dep = client.create_deployment(
     alias="prod",
     environment_release_id=release.release_id,
 )
-
-client.grant_entitlement(
-    grantee_tenant_id="buyer-tenant-id",
-    listing_id=listing.listing_id,
-    license_id="apache-2.0",
-)
-
-# Track usage analytics
-stats = client.get_creator_aggregates(release_id=release.release_id)
 ```
 
 ## TRL GRPO Integration
@@ -307,7 +353,7 @@ client = Epsilab(load_dotenv=True)  # reads from .env file
 | `create_purchase(listing_id, license_version_id, ...)` | Purchase access under a published license offer |
 | `list_purchases(...)` | List your purchases |
 
-### Creator: Registry and Publishing
+### Creator: Publishing
 
 | Method | Description |
 |--------|-------------|

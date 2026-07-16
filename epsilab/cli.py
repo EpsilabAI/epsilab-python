@@ -98,6 +98,43 @@ def _err(msg: str) -> None:
     sys.exit(1)
 
 
+def _friendly_error(exc: Exception) -> str:
+    """Return a user-friendly error message from an SDK exception."""
+    from .exceptions import ApiError, AuthError, RateLimitError, InsufficientCreditsError
+
+    if isinstance(exc, AuthError):
+        return "Authentication failed. Run: epsilab login"
+    if isinstance(exc, RateLimitError):
+        retry = f" (retry in {exc.retry_after}s)" if exc.retry_after else ""
+        return f"Rate limited{retry}. Please wait and try again."
+    if isinstance(exc, InsufficientCreditsError):
+        return "Insufficient credits. Check your account at epsilab.com."
+    if isinstance(exc, ApiError):
+        code = exc.status_code
+        try:
+            import json as _json
+            body = _json.loads(str(exc).split(": ", 1)[-1])
+            if isinstance(body, dict) and "detail" in body:
+                detail = body["detail"]
+                if isinstance(detail, str):
+                    return detail
+                if isinstance(detail, list):
+                    return "; ".join(
+                        d.get("msg", str(d)) for d in detail if isinstance(d, dict)
+                    )
+        except Exception:
+            pass
+        msg = str(exc)
+        if code == 404:
+            return "Not found. Check the ID and try again."
+        if code == 409:
+            return "Already exists."
+        if code == 422:
+            return msg.split(": ", 1)[-1] if ": " in msg else msg
+        return f"Request failed ({code}). Use -v for details."
+    return str(exc)
+
+
 def _ok(msg: str) -> None:
     print(msg)
 
@@ -276,7 +313,7 @@ def cmd_whoami(args: argparse.Namespace) -> None:
             f"{_DASHBOARD_URL} (Settings > API Keys)"
         )
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -308,7 +345,7 @@ def cmd_env_list(args: argparse.Namespace) -> None:
             ]
             _table(rows, ["id", "slug", "title", "visibility", "status"])
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -339,7 +376,7 @@ def cmd_env_search(args: argparse.Namespace) -> None:
             ]
             _table(rows, ["id", "title", "domain", "score"])
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -431,7 +468,7 @@ def cmd_env_create(args: argparse.Namespace) -> None:
         _ok(f"  epsilab deploy")
         _ok(f"\nManage this listing at {_DASHBOARD_URL} (My Environments)")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -506,47 +543,54 @@ def _save_project(directory: Path, project: dict) -> None:
         gitignore.write_text("# managed by epsilab cli\nproject.json\n")
 
 
-def _docker_build_and_push(
-    directory: Path, image_tag: str, *, build_context: Path | None = None,
-    build_args: dict | None = None,
-) -> str:
-    """Build a Docker image and push it. Returns the sha256 digest."""
+def _docker_build_and_upload(
+    client: EpsilabClient, directory: Path, image_tag: str,
+    *, build_context: Path | None = None, build_args: dict | None = None,
+) -> dict:
+    """Build a Docker image locally and upload via the API.
+
+    Returns dict with image_ref, registry_digest, content_digest, size_bytes.
+    Users never need container registry credentials.
+    """
     import subprocess
+    import tempfile
+
     ctx = build_context or directory
+    local_tag = f"epsilab-local/{image_tag.split('/')[-1] if '/' in image_tag else image_tag}"
+
     cmd = ["docker", "build", "--platform", "linux/amd64"]
     for k, v in (build_args or {}).items():
         cmd.extend(["--build-arg", f"{k}={v}"])
-    cmd.extend(["-t", image_tag, "-f", str(directory / "Dockerfile"), str(ctx)])
-    _ok(f"  Building {image_tag} ...")
+    cmd.extend(["-t", local_tag, "-f", str(directory / "Dockerfile"), str(ctx)])
+    _ok(f"  Building image ...")
+    _cli_logger.debug("docker build: %s", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         _err(f"Docker build failed:\n{result.stderr}")
 
-    _ok(f"  Pushing {image_tag} ...")
-    push = subprocess.run(
-        ["docker", "push", image_tag], capture_output=True, text=True,
-    )
-    if push.returncode != 0:
-        _err(f"Docker push failed:\n{push.stderr}")
+    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
+        tarball_path = tmp.name
 
-    inspect = subprocess.run(
-        ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image_tag],
-        capture_output=True, text=True,
-    )
-    if inspect.returncode == 0 and "@sha256:" in inspect.stdout:
-        digest = "sha256:" + inspect.stdout.strip().split("@sha256:")[1]
-    else:
-        digest_line = [l for l in push.stdout.splitlines() if "digest:" in l.lower()]
-        if digest_line:
-            import re
-            m = re.search(r"sha256:[0-9a-f]{64}", digest_line[-1])
-            if m:
-                digest = m.group(0)
-            else:
-                _err("Could not extract digest from docker push output")
-        else:
-            _err("Could not extract digest from docker push output")
-    return digest
+    try:
+        _ok(f"  Saving image ...")
+        save = subprocess.run(
+            ["docker", "save", "-o", tarball_path, local_tag],
+            capture_output=True, text=True, timeout=300,
+        )
+        if save.returncode != 0:
+            _err(f"Docker save failed:\n{save.stderr}")
+
+        size_mb = Path(tarball_path).stat().st_size / (1024 * 1024)
+        _ok(f"  Uploading image ({size_mb:.0f} MiB) ...")
+
+        upload_result = client.upload_image(tarball_path, tag=image_tag)
+
+        _ok(f"  Uploaded successfully")
+        return upload_result
+    finally:
+        Path(tarball_path).unlink(missing_ok=True)
+        subprocess.run(["docker", "rmi", local_tag],
+                       capture_output=True, timeout=30)
 
 
 def _content_digest(path: Path) -> str:
@@ -774,7 +818,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
             _deploy_environment(args, client, directory, detected, project, namespace_id, deploy_start)
 
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -905,28 +949,16 @@ def _deploy_environment(
     directory: Path, detected: dict, project: dict, namespace_id: str,
     deploy_start: float = 0.0,
 ) -> None:
-    """Build, push, and register an environment release."""
+    """Build, upload, and register an environment release."""
     listing_id = project["listing_id"]
 
-    registry = args.registry or os.environ.get("EPSILAB_REGISTRY", "")
-    if not registry:
-        try:
-            config = client.get_platform_config()
-            registry = config.get("container_registry", "")
-        except Exception:
-            pass
-    if not registry:
-        _err(
-            "Could not determine container registry.\n"
-            "  Set EPSILAB_REGISTRY or pass --registry."
-        )
     version = args.version or "0.1.0"
     if is_interactive() and not args.yes and not args.version:
         version = text("Version", default=version)
 
-    image_tag = f"{registry}/{project['slug']}:{version}"
+    image_tag = f"{project['slug']}:{version}"
 
-    step("Building and pushing")
+    step("Building and uploading")
     build_args = {}
     shared_dir = directory.parent.parent / "_shared" if (directory.parent.parent / "_shared").exists() else None
     if shared_dir and "ENV_PATH" in (directory / "Dockerfile").read_text():
@@ -936,15 +968,17 @@ def _deploy_environment(
     else:
         build_context = None
 
-    digest = _docker_build_and_push(
-        directory, image_tag, build_context=build_context, build_args=build_args,
+    upload = _docker_build_and_upload(
+        client, directory, image_tag,
+        build_context=build_context, build_args=build_args,
     )
-    status(f"Image: {image_tag}", ok=True)
-    status(f"Digest: {digest[:20]}...", ok=True)
+    oci_ref = upload["image_ref"]
+    digest = upload.get("content_digest", upload.get("image_ref", "").split("@")[-1])
+    status(f"Image: {project['slug']}:{version}", ok=True)
+    if digest:
+        status(f"Digest: {digest[:20]}...", ok=True)
 
     step("Registering release")
-
-    oci_ref = f"oci://{image_tag}@{digest}"
 
     tasks = detected.get("tasks", [])
     if tasks:
@@ -1042,7 +1076,6 @@ def _deploy_environment(
     print()
     _ok(f"Deployed {project['slug']} v{version} ({deploy_elapsed:.1f}s)")
     _ok(f"  Release:  {release.release_id}")
-    _ok(f"  Image:    {image_tag}")
     _ok(f"  Tasks:    {len(members)}")
     if args.prod:
         _ok(f"  Status:   Live")
@@ -1212,7 +1245,7 @@ def cmd_env_push(args: argparse.Namespace) -> None:
             _ok("\nRelease is live according to the listing's visibility setting.")
         _ok(f"\nView release details at {_DASHBOARD_URL} (My Environments)")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1259,7 +1292,7 @@ def cmd_env_deploy(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(dep)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1278,7 +1311,7 @@ def cmd_env_grant(args: argparse.Namespace) -> None:
         _ok(f"  listing: {args.listing_id}")
         _ok(f"\nManage entitlements at {_DASHBOARD_URL} (My Environments)")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1305,7 +1338,7 @@ def cmd_env_status(args: argparse.Namespace) -> None:
             _ok("\n  No quality badges yet. Run a qualification report:")
             _ok(f"    epsilab env qualify {args.release_id}")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1323,7 +1356,7 @@ def cmd_env_qualify(args: argparse.Namespace) -> None:
         _ok("\nCheck progress with:")
         _ok(f"  epsilab env status {args.release_id}")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1377,7 +1410,7 @@ def cmd_task_create(args: argparse.Namespace) -> None:
         result = client.create_task(task_data)
         _ok(f"Task created: {result.get('task_id', '?')}")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1403,7 +1436,7 @@ def cmd_task_list(args: argparse.Namespace) -> None:
             _ok(f"  {tid}  [{domain}/{diff}]  {prompt}")
         _ok(f"\n{len(tasks)} task(s)")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1431,33 +1464,10 @@ def cmd_namespace_create(args: argparse.Namespace) -> None:
         ns_id = ns.get("namespace_id", "?")
         _ok(f"\nNamespace created: {ns_id}")
         _ok(f"  slug: {slug}")
-        _ok("\nNext step: create a listing in this namespace:")
-        _ok(f"  epsilab env create --namespace-id {ns_id} <slug> \"<title>\"")
-
-        if is_interactive() and confirm("Create a listing in this namespace now?"):
-            listing_slug = text("Listing slug", required=True)
-            listing_title = text("Listing title", required=True)
-            listing_summary = text("Short description", default="")
-            visibility = select("Visibility", [
-                {"value": "public", "label": "Public — visible in marketplace"},
-                {"value": "shared", "label": "Shared — visible to collaborators"},
-                {"value": "unlisted", "label": "Unlisted — accessible via direct link"},
-                {"value": "private", "label": "Private — only you"},
-            ], default="public")
-
-            listing = client.create_listing(
-                namespace_id=str(ns_id),
-                slug=listing_slug,
-                title=listing_title,
-                summary=listing_summary or None,
-                visibility=visibility,
-            )
-            _ok(f"\nCreated listing: {listing.listing_id}")
-            _ok(f"  slug: {listing.slug}")
-            _ok("\nReady to push:")
-            _ok(f"  epsilab env push --manifest epsilab.json --listing-id {listing.listing_id}")
+        _ok("\nDeploy an environment or tool:")
+        _ok(f"  cd your-project/ && epsilab deploy")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1485,7 +1495,7 @@ def cmd_profile_show(args: argparse.Namespace) -> None:
         else:
             _err(str(e))
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1517,7 +1527,7 @@ def cmd_profile_create(args: argparse.Namespace) -> None:
         _ok(f"\nCreator profile created: {profile.get('display_name', '?')}")
         _ok(f"Manage your profile at {_DASHBOARD_URL} (Settings > Profile)")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -1525,34 +1535,16 @@ def cmd_profile_create(args: argparse.Namespace) -> None:
 # ── env init ─────────────────────────────────────────────────────────
 
 
-_MANIFEST_TEMPLATE = """\
-{
-  "namespace_id": "",
-  "listing_id": "",
-  "release_version": "0.1.0",
-  "task_pack": {
-    "name": "%(slug)s-tasks",
-    "artifact_ref": "",
-    "artifact_digest": "",
-    "usage_policy": "training",
-    "license_id": "apache-2.0"
-  },
-  "verifier": {
-    "name": "%(slug)s-verifier",
-    "runtime_ref": "",
-    "runtime_digest": "",
-    "source_digest": "",
-    "evidence_schema_digest": "",
-    "reward_mode": "binary"
-  },
-  "environment": {
-    "protocol_version": "0.4.1",
-    "runtime_ref": "",
-    "runtime_digest": "",
-    "action_schema_digest": "",
-    "observation_schema_digest": ""
+_TASKS_TEMPLATE = """\
+[
+  {
+    "task_id": "%(slug)s-001",
+    "prompt": "Complete the task.",
+    "difficulty": "easy",
+    "split": "train",
+    "max_steps": 10
   }
-}
+]
 """
 
 _DOCKERFILE_TEMPLATE = """\
@@ -1631,9 +1623,9 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
 
     _ok("Verifying environment project...\n")
 
-    # ── 1. Manifest checks ────────────────────────────────────────
+    # ── 1. Manifest checks (optional — deploy flow doesn't use manifests) ──
     if not manifest_path.exists():
-        errors.append(f"Manifest not found: {manifest_path}")
+        passed.append("No manifest file (not required for epsilab deploy)")
     else:
         try:
             manifest = json.loads(manifest_path.read_text())
@@ -1666,10 +1658,8 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
                         passed.append(f"environment.{digest_field} format is valid")
 
                 ref = env_config.get("runtime_ref", "")
-                if ref and not ref.startswith("oci://"):
-                    warnings.append("environment.runtime_ref does not start with oci:// — may not be accepted")
-                elif ref:
-                    passed.append("environment.runtime_ref looks like a valid OCI reference")
+                if ref:
+                    passed.append("environment.runtime_ref is set")
 
             tp_config = manifest.get("task_pack", {})
             if isinstance(tp_config, dict):
@@ -1830,7 +1820,7 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
                         warnings.append(
                             f"Local image digest ({local_digest[:20]}...) differs from "
                             f"manifest runtime_digest ({env_digest[:20]}...) — "
-                            "the manifest digest should match the pushed registry image"
+                            "rebuild and redeploy to update"
                         )
         except Exception:
             pass
@@ -1895,28 +1885,26 @@ def cmd_env_init(args: argparse.Namespace) -> None:
 
     target.mkdir(parents=True, exist_ok=True)
 
-    (target / "epsilab.json").write_text(_MANIFEST_TEMPLATE % {"slug": slug})
     (target / "Dockerfile").write_text(_DOCKERFILE_TEMPLATE)
     (target / "server.py").write_text(_SERVER_TEMPLATE)
+    (target / "tasks.json").write_text(_TASKS_TEMPLATE % {"slug": slug})
     (target / "requirements.txt").write_text("")
 
     _ok(f"\nInitialized environment project in {target}/")
     _ok("")
-    _ok(f"  {target}/epsilab.json   — release manifest (fill in refs and digests)")
     _ok(f"  {target}/Dockerfile     — container image template")
-    _ok(f"  {target}/server.py      — minimal environment server")
+    _ok(f"  {target}/server.py      — minimal environment server (POST /reset, POST /step)")
+    _ok(f"  {target}/tasks.json     — task definitions")
     _ok("")
     _ok("Next steps:")
     _ok("  1. Implement your environment logic in server.py")
-    _ok("  2. Build and push your container image")
-    _ok("  3. Fill in epsilab.json with image refs and content digests")
-    _ok(f"  4. Create a namespace:  epsilab namespace create {slug}")
-    _ok(f"  5. Create a listing:    epsilab env create --namespace-id <ns-id> {slug} \"My Environment\"")
-    _ok("  6. Push a release:      epsilab env push --manifest epsilab.json --listing-id <listing-id>")
-    _ok("  7. Deploy:              epsilab env deploy --listing-id <listing-id> --release-id <rel-id>")
+    _ok("  2. Add your tasks to tasks.json")
+    _ok(f"  3. Deploy:  cd {target} && epsilab deploy")
+    _ok("")
+    _ok("The deploy command handles everything: building, uploading, and registering.")
+    _ok("No registry credentials or manual image pushing required.")
     _ok("")
     _ok(f"Documentation:  {_DASHBOARD_URL} (Documentation > Quick Start)")
-    _ok(f"Dashboard:      {_DASHBOARD_URL} (My Environments)")
 
 
 # ── env session commands ──────────────────────────────────────────────
@@ -1954,13 +1942,16 @@ def cmd_env_session_create(args: argparse.Namespace) -> None:
         if session.observation:
             _ok(f"  observation: {session.observation[:300]}")
         if session.session_token:
-            _ok(f"  token:      {session.session_token[:20]}...")
+            _ok(f"  token:      {session.session_token[:8]}{'*' * 12}")
         _ok("")
-        _ok(f"Next: epsilab env session step {session.session_id} \"<action>\" --token {session.session_token[:20]}...")
+        _ok(f"Next: epsilab env session step {session.session_id} \"<action>\" --session-token <token>")
         if args.json:
-            _json_out(session.to_dict())
+            safe = session.to_dict()
+            if "session_token" in safe:
+                safe["session_token"] = safe["session_token"][:8] + "***"
+            _json_out(safe)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2015,7 +2006,7 @@ def cmd_env_session_step(args: argparse.Namespace) -> None:
                         "terminated": result.terminated, "truncated": result.truncated,
                         "info": result.info})
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2049,7 +2040,7 @@ def cmd_env_session_show(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(session.to_dict())
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2062,7 +2053,7 @@ def cmd_env_session_cancel(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2082,7 +2073,7 @@ def cmd_env_publish(args: argparse.Namespace) -> None:
         _ok(f"  status: {result.get('status', 'published')}")
         _ok("\nThe listing is now publicly available on the hub.")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2135,7 +2126,7 @@ def cmd_env_review(args: argparse.Namespace) -> None:
         )
         _ok(f"Review submitted: {result.get('review_id', '?')}")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2173,7 +2164,7 @@ def cmd_env_purchase(args: argparse.Namespace) -> None:
         _ok(f"Purchase created: {result.get('purchase_id', '?')}")
         _ok(f"  status: {result.get('status', '?')}")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2214,7 +2205,7 @@ def cmd_env_batch_create(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2238,7 +2229,7 @@ def cmd_env_batch_list(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(batches)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2266,7 +2257,7 @@ def cmd_env_batch_show(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(batch)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2279,7 +2270,7 @@ def cmd_env_batch_cancel(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2315,7 +2306,7 @@ def cmd_env_export_create(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2338,7 +2329,7 @@ def cmd_env_export_list(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(exports)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2355,7 +2346,7 @@ def cmd_env_export_show(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(export)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2402,7 +2393,7 @@ def cmd_run_create(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(run.to_dict())
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2426,7 +2417,7 @@ def cmd_run_list(args: argparse.Namespace) -> None:
         if args.json:
             _json_out([r.to_dict() for r in runs])
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2453,7 +2444,7 @@ def cmd_run_show(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(run.to_dict())
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2465,7 +2456,7 @@ def cmd_run_cancel(args: argparse.Namespace) -> None:
         _ok(f"Run cancelled: {run.run_id}")
         _ok(f"  status: {run.status}")
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2505,7 +2496,7 @@ def cmd_run_export(args: argparse.Namespace) -> None:
         else:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2562,7 +2553,7 @@ def cmd_run_eval(args: argparse.Namespace) -> None:
             _json_out({"evaluation_id": result.evaluation_id,
                         "runs": [r.to_dict() for r in result.runs]})
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2588,7 +2579,7 @@ def cmd_rl_envs(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2629,7 +2620,7 @@ def cmd_rl_session(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(session.to_dict())
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2670,7 +2661,7 @@ def cmd_rl_step(args: argparse.Namespace) -> None:
                         "terminated": result.terminated, "truncated": result.truncated,
                         "info": result.info})
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2724,7 +2715,7 @@ def cmd_rl_trajectory(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(traj.to_dict())
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2769,7 +2760,7 @@ def cmd_rl_sessions(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2798,7 +2789,7 @@ def cmd_rl_export(args: argparse.Namespace) -> None:
         else:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2809,7 +2800,7 @@ def cmd_rl_stats(args: argparse.Namespace) -> None:
         stats = client.get_rl_stats(domain=args.domain, env_type=args.env_type)
         _json_out(stats)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2830,7 +2821,7 @@ def cmd_rl_curriculum(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2874,7 +2865,7 @@ def cmd_route(args: argparse.Namespace) -> None:
         if args.json:
             _json_out(result)
     except EpsilabError as e:
-        _err(str(e))
+        _err(_friendly_error(e))
     finally:
         client.close()
 
@@ -2940,7 +2931,6 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     deploy_p.add_argument("directory", nargs="?", default=".", help="Environment directory (default: .)")
-    deploy_p.add_argument("--registry", help="Container registry override (auto-detected from platform)")
     deploy_p.add_argument("--version", help="Release version (default: 0.1.0)")
     deploy_p.add_argument("--namespace-id", help="Namespace ID (skips namespace selection)")
     deploy_p.add_argument("--prod", action="store_true", help="Deploy for hosted execution after pushing")
