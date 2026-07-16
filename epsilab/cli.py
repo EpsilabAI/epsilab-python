@@ -875,7 +875,7 @@ def _deploy_environment(
     registry = args.registry or os.environ.get("EPSILAB_REGISTRY", "")
     if not registry:
         if is_interactive() and not args.yes:
-            registry = text("Container registry", default="registry.example.com/your-project")
+            registry = text("Container registry")
         else:
             _err(
                 "No container registry configured.\n"
