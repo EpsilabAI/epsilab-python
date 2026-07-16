@@ -2344,7 +2344,7 @@ class EpsilabClient:
             params["query"] = query
         if sort_by:
             params["sort_by"] = sort_by
-        return self._request("GET", "/public/listings", params=params)
+        return self._request("GET", "/v1/public/listings", params=params)
 
     def search_environments(
         self,
@@ -3228,7 +3228,7 @@ class EpsilabClient:
             payload["body"] = body
         if usage_hours is not None:
             payload["usage_hours"] = usage_hours
-        return self._request("POST", "/reviews", json_body=payload)
+        return self._request("POST", "/v1/reviews", json_body=payload)
 
     def list_reviews(
         self,
@@ -3246,7 +3246,7 @@ class EpsilabClient:
         """
         return self._request(
             "GET",
-            f"/reviews/{self._path_segment(listing_id)}",
+            f"/v1/reviews/{self._path_segment(listing_id)}",
             params={"limit": limit, "offset": offset},
         )
 
@@ -3285,7 +3285,7 @@ class EpsilabClient:
             payload["license_version_id"] = license_version_id
         if payment_reference:
             payload["payment_reference"] = payment_reference
-        return self._request("POST", "/purchases", json_body=payload)
+        return self._request("POST", "/v1/purchases", json_body=payload)
 
     def list_purchases(
         self,
@@ -3304,7 +3304,7 @@ class EpsilabClient:
         params: Dict[str, Any] = {"limit": limit, "offset": offset}
         if status:
             params["status"] = status
-        return self._request("GET", "/purchases", params=params)
+        return self._request("GET", "/v1/purchases", params=params)
 
     # ── Notifications ────────────────────────────────────────────────
 
@@ -3325,7 +3325,7 @@ class EpsilabClient:
         params: Dict[str, Any] = {"limit": limit, "offset": offset}
         if unread_only is not None:
             params["unread_only"] = str(unread_only).lower()
-        return self._request("GET", "/notifications", params=params)
+        return self._request("GET", "/v1/notifications", params=params)
 
     def mark_notification_read(self, notification_id: str) -> Dict[str, Any]:
         """Mark a notification as read.
@@ -3335,7 +3335,7 @@ class EpsilabClient:
         """
         return self._request(
             "POST",
-            f"/notifications/{self._path_segment(notification_id)}/read",
+            f"/v1/notifications/{self._path_segment(notification_id)}/read",
         )
 
     # ── Creator: registry & publishing ───────────────────────────────
@@ -3797,11 +3797,11 @@ class EpsilabClient:
             body["avatar_url"] = avatar_url
         if contact_email:
             body["contact_email"] = contact_email
-        return self._request("POST", "/creator-profiles", json_body=body)
+        return self._request("POST", "/v1/creator-profiles", json_body=body)
 
     def get_creator_profile(self) -> Dict[str, Any]:
         """Get your creator profile."""
-        return self._request("GET", "/creator-profiles/me")
+        return self._request("GET", "/v1/creator-profiles/me")
 
     def update_creator_profile(
         self,
@@ -3839,7 +3839,7 @@ class EpsilabClient:
             body["contact_email"] = contact_email
         if is_public is not None:
             body["is_public"] = is_public
-        return self._request("PATCH", "/creator-profiles/me", json_body=body)
+        return self._request("PATCH", "/v1/creator-profiles/me", json_body=body)
 
     def request_publish(
         self,
@@ -3858,7 +3858,7 @@ class EpsilabClient:
         """
         return self._request(
             "POST",
-            "/moderation/publish-request",
+            "/v1/moderation/publish-request",
             json_body={"listing_id": listing_id},
         )
 
@@ -3902,7 +3902,7 @@ class EpsilabClient:
             payload["notify_buyers"] = notify_buyers
         if listing_id:
             payload["listing_id"] = listing_id
-        return self._request("POST", "/changelogs", json_body=payload)
+        return self._request("POST", "/v1/changelogs", json_body=payload)
 
     def list_changelogs(
         self,
@@ -3918,7 +3918,7 @@ class EpsilabClient:
         """
         return self._request(
             "GET",
-            f"/changelogs/{self._path_segment(release_id)}",
+            f"/v1/changelogs/{self._path_segment(release_id)}",
             params={"limit": limit},
         )
 
@@ -3986,7 +3986,7 @@ class EpsilabClient:
             params["protocol_family"] = protocol_family
         if status:
             params["status"] = status
-        return self._request("GET", "/adapters", params=params)
+        return self._request("GET", "/v1/adapters", params=params)
 
     def get_adapter(self, adapter_id: str) -> Dict[str, Any]:
         """Get adapter details.
@@ -3996,7 +3996,7 @@ class EpsilabClient:
         """
         return self._request(
             "GET",
-            f"/adapters/{self._path_segment(adapter_id)}",
+            f"/v1/adapters/{self._path_segment(adapter_id)}",
         )
 
     def list_adapter_versions(
@@ -4016,7 +4016,7 @@ class EpsilabClient:
             params["status"] = status
         return self._request(
             "GET",
-            f"/adapters/{self._path_segment(adapter_id)}/versions",
+            f"/v1/adapters/{self._path_segment(adapter_id)}/versions",
             params=params,
         )
 
@@ -4043,7 +4043,7 @@ class EpsilabClient:
             params["status"] = status
         return self._request(
             "GET",
-            f"/adapters/{self._path_segment(adapter_id)}/conformance",
+            f"/v1/adapters/{self._path_segment(adapter_id)}/conformance",
             params=params,
         )
 
@@ -4060,7 +4060,7 @@ class EpsilabClient:
         """
         return self._request(
             "GET",
-            f"/adapters/{self._path_segment(adapter_id)}/equivalence/check",
+            f"/v1/adapters/{self._path_segment(adapter_id)}/equivalence/check",
             params={"version_id": version_id},
         )
 
@@ -4088,6 +4088,6 @@ class EpsilabClient:
             body["metadata"] = metadata
         return self._request(
             "POST",
-            "/adapters/usage",
+            "/v1/adapters/usage",
             json_body=body,
         )
