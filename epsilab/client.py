@@ -4010,7 +4010,7 @@ class EpsilabClient:
         """Publish a listing on the environment hub (creator operation).
 
         Args:
-            listing_id: The listing to submit for review.
+            listing_id: The listing to publish publicly.
             idempotency_key: Unique key for at-most-once delivery.
 
         Returns:

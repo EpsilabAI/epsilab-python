@@ -2,6 +2,7 @@
 
 Usage::
 
+    epsilab deploy                    # build, push, and register (one command)
     epsilab login
     epsilab whoami
     epsilab env list / search / create / push / deploy / session / batch / export
@@ -423,7 +424,8 @@ def cmd_env_create(args: argparse.Namespace) -> None:
         _ok(f"  title: {listing.title}")
         _ok(f"  visibility: {listing.visibility}")
         _ok("\nNext steps:")
-        _ok(f"  epsilab env push --manifest epsilab.json --listing-id {listing.listing_id}")
+        _ok(f"  cd your-environment-directory/")
+        _ok(f"  epsilab deploy")
         _ok(f"\nManage this listing at {_DASHBOARD_URL} (My Environments)")
     except EpsilabError as e:
         _err(str(e))
@@ -437,6 +439,575 @@ def _deterministic_idem_key(prefix: str, **fields: object) -> str:
     canonical = json.dumps(fields, sort_keys=True, default=str)
     h = hashlib.sha256(canonical.encode()).hexdigest()[:32]
     return f"{prefix}-{h}"
+
+
+# ── deploy (top-level, Vercel-style) ────────────────────────────────
+
+_PROJECT_DIR = ".epsilab"
+_PROJECT_FILE = "project.json"
+
+
+def _detect_project_type(directory: Path) -> dict:
+    """Auto-detect whether a directory is an environment or an application tool."""
+    detected: dict = {"directory": str(directory.resolve()), "type": "unknown"}
+    if (directory / "Dockerfile").exists():
+        detected["dockerfile"] = True
+    if (directory / "server.py").exists():
+        detected["server"] = True
+    if (directory / "plugin.py").exists():
+        detected["plugin"] = True
+    if (directory / "api.py").exists():
+        detected["api"] = True
+    if (directory / "state.py").exists():
+        detected["state"] = True
+    tasks_path = directory / "tasks.json"
+    if tasks_path.exists():
+        try:
+            tasks = json.loads(tasks_path.read_text())
+            if isinstance(tasks, list):
+                detected["tasks"] = tasks
+                detected["task_count"] = len(tasks)
+        except (json.JSONDecodeError, OSError):
+            pass
+    if (directory / "verifier.py").exists():
+        detected["verifier"] = True
+    if (directory / "pyproject.toml").exists():
+        detected["pyproject"] = True
+
+    if detected.get("plugin") and detected.get("api") and detected.get("state"):
+        detected["type"] = "tool"
+    elif detected.get("dockerfile"):
+        detected["type"] = "environment"
+    return detected
+
+
+def _load_project(directory: Path) -> dict | None:
+    """Load .epsilab/project.json if it exists."""
+    project_file = directory / _PROJECT_DIR / _PROJECT_FILE
+    if project_file.exists():
+        try:
+            return json.loads(project_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+
+def _save_project(directory: Path, project: dict) -> None:
+    """Save project config to .epsilab/project.json."""
+    project_dir = directory / _PROJECT_DIR
+    project_dir.mkdir(parents=True, exist_ok=True)
+    project_file = project_dir / _PROJECT_FILE
+    project_file.write_text(json.dumps(project, indent=2) + "\n")
+    gitignore = project_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("# managed by epsilab cli\nproject.json\n")
+
+
+def _docker_build_and_push(
+    directory: Path, image_tag: str, *, build_context: Path | None = None,
+    build_args: dict | None = None,
+) -> str:
+    """Build a Docker image and push it. Returns the sha256 digest."""
+    import subprocess
+    ctx = build_context or directory
+    cmd = ["docker", "build", "--platform", "linux/amd64"]
+    for k, v in (build_args or {}).items():
+        cmd.extend(["--build-arg", f"{k}={v}"])
+    cmd.extend(["-t", image_tag, "-f", str(directory / "Dockerfile"), str(ctx)])
+    _ok(f"  Building {image_tag} ...")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        _err(f"Docker build failed:\n{result.stderr}")
+
+    _ok(f"  Pushing {image_tag} ...")
+    push = subprocess.run(
+        ["docker", "push", image_tag], capture_output=True, text=True,
+    )
+    if push.returncode != 0:
+        _err(f"Docker push failed:\n{push.stderr}")
+
+    inspect = subprocess.run(
+        ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image_tag],
+        capture_output=True, text=True,
+    )
+    if inspect.returncode == 0 and "@sha256:" in inspect.stdout:
+        digest = "sha256:" + inspect.stdout.strip().split("@sha256:")[1]
+    else:
+        digest_line = [l for l in push.stdout.splitlines() if "digest:" in l.lower()]
+        if digest_line:
+            import re
+            m = re.search(r"sha256:[0-9a-f]{64}", digest_line[-1])
+            if m:
+                digest = m.group(0)
+            else:
+                _err("Could not extract digest from docker push output")
+        else:
+            _err("Could not extract digest from docker push output")
+    return digest
+
+
+def _content_digest(path: Path) -> str:
+    """SHA-256 digest of a file's contents."""
+    import hashlib
+    h = hashlib.sha256(path.read_bytes())
+    return f"sha256:{h.hexdigest()}"
+
+
+def _resolve_namespace(client: EpsilabClient, directory: Path, *, auto: bool = False, explicit_id: str | None = None) -> str:
+    """Resolve a namespace ID: use explicit > saved > auto-select > create."""
+    if explicit_id:
+        return explicit_id
+
+    listings = client.list_environment_listings(limit=100)
+    ns_map: dict[str, str] = {}
+    for li in listings:
+        if li.namespace_id and li.namespace_id not in ns_map:
+            ns_map[li.namespace_id] = li.namespace or li.namespace_id[:12]
+
+    if len(ns_map) == 1:
+        ns_id = next(iter(ns_map))
+        _ok(f"  Using namespace: {ns_map[ns_id]}")
+        return ns_id
+
+    if len(ns_map) > 1 and is_interactive() and not auto:
+        choices = [{"value": k, "label": v} for k, v in ns_map.items()]
+        return select_or_create(
+            "Which namespace?", choices,
+            create_label="Create new namespace",
+            create_fn=lambda: _create_namespace(client, directory, auto=False),
+        )
+
+    return _create_namespace(client, directory, auto=auto)
+
+
+def _create_namespace(client: EpsilabClient, directory: Path, *, auto: bool = False) -> str:
+    """Create a namespace, interactively or from the directory name."""
+    default_slug = directory.parent.name.lower().replace(" ", "-").replace("_", "-")
+    if len(default_slug) < 3:
+        default_slug = directory.name.lower().replace(" ", "-").replace("_", "-")
+    if auto or not is_interactive():
+        slug = default_slug
+        display_name = slug.replace("-", " ").title()
+    else:
+        slug = text("Namespace slug", default=default_slug)
+        display_name = text("Display name", default=slug.replace("-", " ").title())
+    ns = client.create_namespace(slug=slug, display_name=display_name)
+    namespace_id = str(ns.get("namespace_id", ns.get("id")))
+    _ok(f"  Created namespace: {slug}")
+    return namespace_id
+
+
+def _resolve_listing(client: EpsilabClient, namespace_id: str, slug: str, title: str, summary: str) -> Any:
+    """Find an existing listing by slug or create a new one."""
+    listings = client.list_environment_listings(limit=100)
+    existing = next(
+        (li for li in listings if li.slug == slug and li.namespace_id == namespace_id),
+        None,
+    )
+    if existing:
+        _ok(f"  Found existing listing: {existing.slug} ({existing.listing_id[:8]}...)")
+        return existing
+    try:
+        listing = client.create_listing(
+            namespace_id=namespace_id, slug=slug,
+            title=title, summary=summary, visibility="public",
+        )
+        _ok(f"  Created listing: {listing.slug}")
+        return listing
+    except ApiError as e:
+        if e.status_code == 409:
+            refreshed = client.list_environment_listings(limit=100)
+            found = next((li for li in refreshed if li.slug == slug), None)
+            if found:
+                _ok(f"  Linked to existing listing: {found.slug}")
+                return found
+        raise
+
+
+def cmd_deploy(args: argparse.Namespace) -> None:
+    """Deploy an environment or application tool. Auto-detects project type."""
+    directory = Path(args.directory).resolve()
+    if not directory.is_dir():
+        _err(f"Not a directory: {directory}")
+
+    detected = _detect_project_type(directory)
+    project_type = detected["type"]
+
+    if project_type == "unknown":
+        files = [f.name for f in directory.iterdir() if f.is_file()]
+        if not files:
+            _err(
+                f"Directory is empty: {directory}\n\n"
+                "  To create an RL environment:\n"
+                "    epsilab env init\n\n"
+                "  An environment needs at minimum:\n"
+                "    Dockerfile     — builds the runtime container\n"
+                "    tasks.json     — defines the task set\n"
+                "    server.py      — OpenEnv-compatible HTTP server\n\n"
+                "  An application tool needs at minimum:\n"
+                "    plugin.py      — AppPlugin subclass\n"
+                "    api.py         — API route handlers\n"
+                "    state.py       — deterministic state model"
+            )
+        has_any = {k for k in ("dockerfile", "plugin", "api", "state", "server", "tasks") if detected.get(k)}
+        hints = []
+        if detected.get("dockerfile") and not detected.get("tasks"):
+            hints.append("  Found Dockerfile but no tasks.json — add a tasks.json with your task definitions")
+        if detected.get("plugin") and not detected.get("api"):
+            hints.append("  Found plugin.py but no api.py — add API route handlers")
+        if detected.get("api") and not detected.get("plugin"):
+            hints.append("  Found api.py but no plugin.py — add an AppPlugin subclass")
+        hint_str = "\n".join(hints) if hints else ""
+        found_str = ", ".join(sorted(has_any)) if has_any else "no recognized project files"
+        _err(
+            f"Could not detect project type in {directory}\n"
+            f"  Found: {found_str}\n\n"
+            "  Environment needs:        Dockerfile + tasks.json\n"
+            "  Application Tool needs:   plugin.py + api.py + state.py\n"
+            + (f"\n{hint_str}\n" if hint_str else "") +
+            "\n  Run 'epsilab env init' to scaffold a new environment."
+        )
+
+    if project_type == "tool":
+        step("Detected application tool")
+        status("plugin.py", ok=True)
+        status("api.py", ok=detected.get("api", False))
+        status("state.py", ok=detected.get("state", False))
+        status("server.py", ok=detected.get("server", False))
+    else:
+        step("Detected environment")
+        status("Dockerfile", ok=True)
+        status("server.py", ok=detected.get("server", False))
+        tc = detected.get("task_count", 0)
+        status(f"tasks.json ({tc} task{'s' if tc != 1 else ''})", ok=bool(detected.get("tasks")))
+        status("verifier.py", ok=detected.get("verifier", False))
+        if not detected.get("tasks"):
+            info("Warning: no tasks.json found — release will have no tasks")
+
+    project = _load_project(directory)
+    client = _get_client()
+    try:
+        if project:
+            pid = project.get("listing_id") or project.get("tool_id") or "?"
+            _ok(f"\n  Linked to {project.get('slug', '?')} ({pid[:8]}...)")
+        else:
+            step("Set up project")
+            if not is_interactive() and not args.yes:
+                _err("No .epsilab/project.json found. Run interactively or use --yes.")
+
+            namespace_id = _resolve_namespace(
+                client, directory,
+                auto=args.yes,
+                explicit_id=getattr(args, "namespace_id", None),
+            )
+
+            slug = directory.name
+            title = slug.replace("-", " ").replace("_", " ").title()
+            summary = ""
+            if is_interactive() and not args.yes:
+                slug = text("Slug", default=slug)
+                title = text("Title", default=title)
+                summary = text("Summary", default="")
+
+            if project_type == "tool":
+                category = _infer_tool_category(directory)
+                if is_interactive() and not args.yes:
+                    category = text("Category", default=category)
+                tool = _resolve_tool(client, namespace_id, slug, title, summary, category)
+                project = {
+                    "type": "tool",
+                    "tool_id": tool.tool_id,
+                    "namespace_id": namespace_id,
+                    "slug": tool.slug,
+                    "title": tool.title,
+                }
+            else:
+                listing = _resolve_listing(client, namespace_id, slug, title, summary)
+                project = {
+                    "type": "environment",
+                    "listing_id": listing.listing_id,
+                    "namespace_id": namespace_id,
+                    "slug": listing.slug,
+                    "title": listing.title,
+                }
+            _save_project(directory, project)
+            _ok(f"  Saved to .epsilab/project.json")
+
+        namespace_id = project["namespace_id"]
+
+        if project.get("type") == "tool" or project_type == "tool":
+            _deploy_tool(args, client, directory, detected, project, namespace_id)
+        else:
+            _deploy_environment(args, client, directory, detected, project, namespace_id)
+
+    except EpsilabError as e:
+        _err(str(e))
+    finally:
+        client.close()
+
+
+def _infer_tool_category(directory: Path) -> str:
+    """Guess a tool category from the directory name."""
+    name = directory.name.lower()
+    categories = {
+        "github": "source-control", "git": "source-control",
+        "slack": "messaging", "linear": "project-management",
+        "calendar": "scheduling", "gmail": "email", "email": "email",
+        "jira": "project-management", "confluence": "documentation",
+    }
+    for keyword, cat in categories.items():
+        if keyword in name:
+            return cat
+    return "general"
+
+
+def _resolve_tool(client: EpsilabClient, namespace_id: str, slug: str, title: str, summary: str, category: str) -> Any:
+    """Find an existing tool by slug or create a new one."""
+    from .models import ApplicationTool
+    tools = client.list_application_tools(limit=100)
+    existing = next(
+        (t for t in tools if t.slug == slug and t.namespace_id == namespace_id),
+        None,
+    )
+    if existing:
+        _ok(f"  Found existing tool: {existing.slug} ({existing.tool_id[:8]}...)")
+        return existing
+    try:
+        tool = client.create_application_tool(
+            namespace_id=namespace_id, slug=slug,
+            title=title, summary=summary,
+            category=category, visibility="public",
+        )
+        _ok(f"  Created tool: {tool.slug}")
+        return tool
+    except ApiError as e:
+        if e.status_code == 409:
+            refreshed = client.list_application_tools(limit=100)
+            found = next((t for t in refreshed if t.slug == slug), None)
+            if found:
+                _ok(f"  Linked to existing tool: {found.slug}")
+                return found
+        raise
+
+
+def _deploy_tool(
+    args: argparse.Namespace, client: EpsilabClient,
+    directory: Path, detected: dict, project: dict, namespace_id: str,
+) -> None:
+    """Build and register an Application Tool release."""
+    import subprocess
+
+    version = args.version or "0.1.0"
+    if is_interactive() and not args.yes and not args.version:
+        version = text("Version", default=version)
+
+    step("Building package")
+    pkg_root = directory
+    while pkg_root.parent != pkg_root:
+        if (pkg_root / "pyproject.toml").exists():
+            break
+        pkg_root = pkg_root.parent
+    else:
+        pkg_root = directory
+
+    dist_dir = pkg_root / "dist"
+    result = subprocess.run(
+        [sys.executable, "-m", "build", "--wheel", "--outdir", str(dist_dir), str(pkg_root)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        _err(f"Package build failed:\n{result.stderr}")
+
+    wheels = sorted(dist_dir.glob("*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not wheels:
+        _err("No wheel found after build")
+    wheel = wheels[0]
+    artifact_digest = _content_digest(wheel)
+    status(f"Built: {wheel.name}", ok=True)
+    status(f"Digest: {artifact_digest[:20]}...", ok=True)
+
+    plugin_names = _detect_plugin_names(directory)
+
+    step("Registering release")
+    source_digest = _content_digest(directory / "plugin.py")
+    tool_id = project["tool_id"]
+    idem = _deterministic_idem_key(
+        "tool-rel", tool_id=tool_id, version=version, digest=artifact_digest,
+    )
+    rel = client.create_application_tool_release(
+        tool_id=tool_id,
+        release_version=version,
+        artifact_ref=f"object://local/{wheel.name}",
+        artifact_digest=artifact_digest,
+        appsuite_version="0.2.0",
+        plugin_names=plugin_names,
+        seed_schema_digest=source_digest,
+        interface_schema_digest=source_digest,
+        license_id="apache-2.0",
+        manifest={"plugins": plugin_names, "version": version},
+        idempotency_key=idem,
+    )
+    release_id = rel.get("release_id", rel.get("id", "?"))
+    status(f"Release: {release_id}", ok=True)
+
+    print()
+    _ok(f"Deployed {project['slug']} v{version}")
+    _ok(f"  Release:  {release_id}")
+    _ok(f"  Package:  {wheel.name}")
+    _ok(f"  Plugins:  {', '.join(plugin_names)}")
+
+
+def _detect_plugin_names(directory: Path) -> list[str]:
+    """Derive slug-format plugin names from the directory."""
+    import re
+    name = directory.name.lower()
+    name = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
+    return [name] if name else ["plugin"]
+
+
+def _deploy_environment(
+    args: argparse.Namespace, client: EpsilabClient,
+    directory: Path, detected: dict, project: dict, namespace_id: str,
+) -> None:
+    """Build, push, and register an environment release."""
+    listing_id = project["listing_id"]
+
+    registry = args.registry or os.environ.get("EPSILAB_REGISTRY", "")
+    if not registry:
+        if is_interactive() and not args.yes:
+            registry = text("Container registry", default="registry.example.com/your-project")
+        else:
+            _err(
+                "No container registry configured.\n"
+                "  Set EPSILAB_REGISTRY or pass --registry."
+            )
+    version = args.version or "0.1.0"
+    if is_interactive() and not args.yes and not args.version:
+        version = text("Version", default=version)
+
+    image_tag = f"{registry}/{project['slug']}:{version}"
+
+    step("Building and pushing")
+    build_args = {}
+    shared_dir = directory.parent.parent / "_shared" if (directory.parent.parent / "_shared").exists() else None
+    if shared_dir and "ENV_PATH" in (directory / "Dockerfile").read_text():
+        rel_env_path = str(directory.relative_to(directory.parent.parent))
+        build_args["ENV_PATH"] = rel_env_path
+        build_context = directory.parent.parent
+    else:
+        build_context = None
+
+    digest = _docker_build_and_push(
+        directory, image_tag, build_context=build_context, build_args=build_args,
+    )
+    status(f"Image: {image_tag}", ok=True)
+    status(f"Digest: {digest[:20]}...", ok=True)
+
+    step("Registering release")
+
+    oci_ref = f"oci://{image_tag}@{digest}"
+
+    tasks = detected.get("tasks", [])
+    if tasks:
+        _ok(f"  Creating {len(tasks)} tasks ...")
+        for t in tasks:
+            task_body = {
+                "task_id": t["task_id"],
+                "domain": t.get("domain", project["slug"]),
+                "capability": t.get("capability", project["slug"]),
+                "prompt": t.get("prompt", t.get("title", t["task_id"])),
+                "verification": t.get("verification", "judge"),
+                "difficulty": t.get("difficulty", "medium"),
+                "max_steps": t.get("max_steps", 50),
+            }
+            if t.get("ground_truth") or t.get("expected_fix"):
+                task_body["ground_truth"] = t.get("ground_truth") or t.get("expected_fix", "")
+            try:
+                client.create_task(task_body)
+            except ApiError as e:
+                if e.status_code != 409:
+                    raise
+        status(f"{len(tasks)} tasks registered", ok=True)
+
+    members = []
+    for t in tasks:
+        members.append({
+            "task_id": t["task_id"],
+            "lineage_group_id": t.get("lineage_group_id", t["task_id"]),
+            "split": t.get("split", "train"),
+        })
+
+    source_digest = _content_digest(directory / "verifier.py") if detected.get("verifier") else digest
+
+    tp_idem = _deterministic_idem_key("tp", namespace_id=namespace_id, slug=project["slug"], version=version, digest=digest)
+    tp = client.create_task_pack_release(
+        namespace_id=namespace_id,
+        name=f"{project['slug']}-tasks",
+        release_version=version,
+        artifact_ref=oci_ref,
+        artifact_digest=digest,
+        usage_policy="training",
+        license_id="apache-2.0",
+        members=members,
+        idempotency_key=tp_idem,
+    )
+    tp_release_id = str(tp.get("release_id", tp.get("id", "")))
+    status(f"Task pack: {len(members)} tasks", ok=True)
+
+    ver_idem = _deterministic_idem_key("ver", namespace_id=namespace_id, slug=project["slug"], version=version, digest=digest)
+    ver = client.create_verifier_release(
+        namespace_id=namespace_id,
+        name=f"{project['slug']}-verifier",
+        release_version=version,
+        runtime_ref=oci_ref,
+        runtime_digest=digest,
+        source_digest=source_digest,
+        evidence_schema_digest=source_digest,
+        reward_mode="binary",
+        idempotency_key=ver_idem,
+    )
+    ver_release_id = str(ver.get("release_id", ver.get("id", "")))
+    status("Verifier registered", ok=True)
+
+    env_idem = _deterministic_idem_key("env", listing_id=listing_id, version=version, digest=digest)
+    release = client.create_environment_release(
+        listing_id=listing_id,
+        release_version=version,
+        protocol_version="0.4.1",
+        runtime_ref=oci_ref,
+        runtime_digest=digest,
+        task_pack_release_id=tp_release_id,
+        verifier_release_id=ver_release_id,
+        action_schema_digest=source_digest,
+        observation_schema_digest=source_digest,
+        resource_policy={
+            "cpu_millis": 2000, "memory_bytes": 512 * 1024 * 1024,
+            "architecture": "amd64", "network_policy": "deny",
+            "runtime_interface": "foundation_native",
+        },
+        idempotency_key=env_idem,
+    )
+    status(f"Release: {release.release_id}", ok=True)
+
+    if args.prod:
+        step("Deploying")
+        deploy_result = client.create_deployment(
+            listing_id=listing_id,
+            environment_release_id=str(release.release_id),
+            alias="production",
+        )
+        deploy_id = deploy_result.get("deployment_id", deploy_result.get("id", "?"))
+        status(f"Deployed: {deploy_id}", ok=True)
+
+    print()
+    _ok(f"Deployed {project['slug']} v{version}")
+    _ok(f"  Release:  {release.release_id}")
+    _ok(f"  Image:    {image_tag}")
+    _ok(f"  Tasks:    {len(members)}")
+    if args.prod:
+        _ok(f"  Status:   Live")
+    else:
+        _ok(f"\n  Run with --prod to deploy for hosted execution.")
 
 
 def _find_manifest(args: argparse.Namespace) -> tuple[dict, Path | None]:
@@ -2178,6 +2749,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     whoami_p = sub.add_parser("whoami", help="Show current authentication status")
     whoami_p.set_defaults(func=cmd_whoami)
+
+    # ── deploy (top-level, Vercel-style) ────────────────────────
+    deploy_p = sub.add_parser(
+        "deploy",
+        help="Build, push, and register an environment or tool (one command)",
+        description=(
+            "Deploy an RL environment or Application Tool from a directory.\n"
+            "Auto-detects the project type from files present:\n\n"
+            "  Environment:       Dockerfile + tasks.json\n"
+            "  Application Tool:  plugin.py + api.py + state.py\n\n"
+            "First time: interactive setup creates the listing and saves\n"
+            "config to .epsilab/project.json. Subsequent runs reuse it.\n\n"
+            "  epsilab deploy              # deploy current directory\n"
+            "  epsilab deploy ./my-env     # deploy a specific directory\n"
+            "  epsilab deploy --prod       # deploy and make live\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    deploy_p.add_argument("directory", nargs="?", default=".", help="Environment directory (default: .)")
+    deploy_p.add_argument("--registry", help="Container registry (default: $EPSILAB_REGISTRY)")
+    deploy_p.add_argument("--version", help="Release version (default: 0.1.0)")
+    deploy_p.add_argument("--namespace-id", help="Namespace ID (skips namespace selection)")
+    deploy_p.add_argument("--prod", action="store_true", help="Deploy for hosted execution after pushing")
+    deploy_p.add_argument("--yes", "-y", action="store_true", help="Skip prompts (use defaults)")
+    deploy_p.set_defaults(func=cmd_deploy)
 
     # ── env ──────────────────────────────────────────────────────
     env_p = sub.add_parser("env", help="Manage environments")
