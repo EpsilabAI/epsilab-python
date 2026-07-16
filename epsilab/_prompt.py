@@ -73,20 +73,126 @@ def text(
         return answer
 
 
+def _read_key() -> str:
+    """Read a single keypress, returning arrow keys as 'up'/'down' and
+    enter as 'enter'.  Falls back to simple input if termios is unavailable."""
+    import tty
+    import termios
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            seq = sys.stdin.read(2)
+            if seq == "[A":
+                return "up"
+            if seq == "[B":
+                return "down"
+            return "escape"
+        if ch in ("\r", "\n"):
+            return "enter"
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _render_choices(choices: Sequence[Dict[str, str]], cursor: int) -> str:
+    lines = []
+    for i, choice in enumerate(choices):
+        if i == cursor:
+            lines.append(f"  {_GREEN}❯{_RESET} {_BOLD}{choice['label']}{_RESET}")
+        else:
+            lines.append(f"    {_DIM}{choice['label']}{_RESET}")
+    return "\n".join(lines)
+
+
 def select(
     message: str,
     choices: Sequence[Dict[str, str]],
     *,
     default: Optional[str] = None,
 ) -> str:
-    """Numbered selection list. Each choice has 'value' and 'label' keys.
+    """Arrow-key selection list. Each choice has 'value' and 'label' keys.
 
+    Falls back to numbered input if the terminal doesn't support raw mode.
     Returns the selected 'value'.
     """
+    cursor = 0
+    if default:
+        for i, c in enumerate(choices):
+            if c["value"] == default:
+                cursor = i
+                break
+
+    # Try arrow-key mode; fall back to numbered input
+    try:
+        import termios as _termios  # noqa: F401
+    except ImportError:
+        return _select_fallback(message, choices, default=default)
+
+    if not sys.stdin.isatty():
+        return _select_fallback(message, choices, default=default)
+
+    print(f"{_label(message)}")
+    n = len(choices)
+    sys.stdout.write(_render_choices(choices, cursor) + "\n")
+    sys.stdout.write(f"  {_DIM}↑/↓ to navigate, enter to select{_RESET}")
+    sys.stdout.flush()
+
+    # +1 for the hint line
+    total_lines = n + 1
+
+    try:
+        while True:
+            key = _read_key()
+            if key == "up":
+                cursor = (cursor - 1) % n
+            elif key == "down":
+                cursor = (cursor + 1) % n
+            elif key == "enter":
+                break
+            else:
+                continue
+
+            # Move cursor up to the start of the choices block, clear, and redraw
+            sys.stdout.write(f"\033[{total_lines}A")
+            for _ in range(total_lines):
+                sys.stdout.write("\033[2K\n")
+            sys.stdout.write(f"\033[{total_lines}A")
+            sys.stdout.write(_render_choices(choices, cursor) + "\n")
+            sys.stdout.write(f"  {_DIM}↑/↓ to navigate, enter to select{_RESET}")
+            sys.stdout.flush()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        if default:
+            return default
+        sys.exit(1)
+
+    # Clear the choices block and print the selection
+    sys.stdout.write(f"\033[{total_lines}A")
+    for _ in range(total_lines):
+        sys.stdout.write("\033[2K\n")
+    sys.stdout.write(f"\033[{total_lines}A")
+
+    selected = choices[cursor]
+    print(f"  {_GREEN}✓{_RESET} {selected['label']}")
+    return selected["value"]
+
+
+def _select_fallback(
+    message: str,
+    choices: Sequence[Dict[str, str]],
+    *,
+    default: Optional[str] = None,
+) -> str:
+    """Numbered input fallback for non-TTY environments."""
     print(f"{_label(message)}")
     for i, choice in enumerate(choices, 1):
-        marker = f"{_GREEN}>{_RESET}" if choice["value"] == default else " "
-        print(f"  {marker} {i}. {choice['label']}")
+        print(f"    {i}. {choice['label']}")
 
     while True:
         try:
