@@ -1,7 +1,7 @@
 """Lightweight interactive prompts for the Epsilab CLI.
 
-Provides Vercel-style step-by-step prompts when stdin is a TTY,
-falls through silently when running non-interactively (CI, pipes).
+Provides step-by-step prompts with arrow-key navigation when stdin is
+a TTY, falls through silently when running non-interactively (CI, pipes).
 No external dependencies — uses only the Python standard library.
 """
 
@@ -32,6 +32,58 @@ def _label(text: str) -> str:
 
 
 def confirm(message: str, *, default: bool = True) -> bool:
+    """Yes/No toggle with arrow keys. Falls back to Y/n text input."""
+    try:
+        import termios as _termios  # noqa: F401
+    except ImportError:
+        return _confirm_fallback(message, default=default)
+
+    if not sys.stdin.isatty():
+        return _confirm_fallback(message, default=default)
+
+    cursor = 0 if default else 1
+    options = ["Yes", "No"]
+
+    def _render() -> str:
+        parts = []
+        for i, opt in enumerate(options):
+            if i == cursor:
+                parts.append(f"{_GREEN}{_BOLD}{opt}{_RESET}")
+            else:
+                parts.append(f"{_DIM}{opt}{_RESET}")
+        return " / ".join(parts)
+
+    sys.stdout.write(f"{_label(message)} {_render()}")
+    sys.stdout.flush()
+
+    try:
+        while True:
+            key = _read_key()
+            if key in ("left", "up", "right", "down", "h", "l", "y", "n"):
+                if key in ("left", "up", "h", "y"):
+                    cursor = 0
+                else:
+                    cursor = 1
+            elif key == "enter":
+                break
+            else:
+                continue
+            sys.stdout.write("\r\033[2K")
+            sys.stdout.write(f"{_label(message)} {_render()}")
+            sys.stdout.flush()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return default
+
+    result = cursor == 0
+    sys.stdout.write("\r\033[2K")
+    icon = f"{_GREEN}✓{_RESET}" if result else f"{_RED}✗{_RESET}"
+    print(f"{_label(message)} {icon} {'Yes' if result else 'No'}")
+    return result
+
+
+def _confirm_fallback(message: str, *, default: bool = True) -> bool:
+    """Text-input fallback for confirm."""
     hint = "Y/n" if default else "y/N"
     try:
         answer = input(f"{_label(message)} {_DIM}({hint}){_RESET} ").strip().lower()
@@ -74,8 +126,8 @@ def text(
 
 
 def _read_key() -> str:
-    """Read a single keypress, returning arrow keys as 'up'/'down' and
-    enter as 'enter'.  Falls back to simple input if termios is unavailable."""
+    """Read a single keypress. Returns 'up', 'down', 'left', 'right',
+    'enter', 'escape', or the literal character."""
     import tty
     import termios
 
@@ -86,11 +138,7 @@ def _read_key() -> str:
         ch = sys.stdin.read(1)
         if ch == "\x1b":
             seq = sys.stdin.read(2)
-            if seq == "[A":
-                return "up"
-            if seq == "[B":
-                return "down"
-            return "escape"
+            return {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(seq, "escape")
         if ch in ("\r", "\n"):
             return "enter"
         if ch == "\x03":
