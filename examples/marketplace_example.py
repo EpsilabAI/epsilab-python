@@ -1,123 +1,129 @@
-"""Example: interact with the Epsilab Environment Hub & Marketplace.
+"""Interact with the Epsilab Environment Hub and Marketplace.
+
+Demonstrates both consumer and publisher workflows:
+
+    - **Consumer:** discover environments, run sessions, star favorites,
+      view entitlements and purchases
+    - **Publisher:** create a namespace, list environments, grant access
 
 Usage:
-    1. Copy ``.env.example`` to ``.env`` and add your API key.
-    2. Run ``python examples/marketplace_example.py``.
-
-    Set ``EPSILAB_RUN_CREATOR_EXAMPLE=1`` to also run the creator workflow.
-
-This example demonstrates both buyer and creator workflows:
-
-    - **Buyer:** discover environments, run a session, inspect quality
-    - **Creator:** register a namespace/listing/release, deploy, grant access
+    pip install epsilab
+    epsilab login
+    python examples/marketplace_example.py
 """
 
 from __future__ import annotations
 
-import os
+import argparse
 
 from epsilab import Epsilab
 
 
-def buyer_workflow(client: Epsilab) -> None:
-    """Discover environments and interact with a hosted session."""
+def consumer_workflow(client: Epsilab) -> None:
+    """Browse the hub, run a session, and inspect listings."""
 
-    # ── Browse the public catalog ────────────────────────────────
-    print("\n── Public Marketplace ──")
-    listings = client.list_public_listings(sort_by="popular", limit=5)
-    print(f"Found {len(listings)} public listings")
-    for item in listings[:3]:
-        print(f"  • {item.get('title', 'untitled')} ({item.get('listing_id', '?')})")
+    # ── Browse the catalog ───────────────────────────────────────
+    print("\n-- Environment Hub --")
+    listings = client.list_environment_listings(limit=10)
+    deployed = [l for l in listings if l.deployment_id]
+    print(f"  {len(deployed)} deployed environments:")
+    for l in deployed[:5]:
+        stars = f"  [{l.star_count} stars]" if hasattr(l, "star_count") and l.star_count else ""
+        print(f"    {l.slug:30s}  {l.title}{stars}")
 
-    # ── Quality-weighted search ──────────────────────────────────
-    print("\n── Search for coding environments ──")
-    results = client.search_environments(
-        domain="coding",
-        min_quality_score=0.7,
-        limit=5,
-    )
-    print(f"Found {len(results)} quality coding environments")
+    # ── Application tools ────────────────────────────────────────
+    print("\n-- Application Tools --")
+    tools = client.list_application_tools(limit=5)
+    print(f"  {len(tools)} tools:")
+    for t in tools[:5]:
+        name = t.get("name") or t.get("slug", "?")
+        print(f"    {name}")
 
-    if not results:
-        print("No environments available to demo — skipping session workflow")
-        return
+    # ── Run a quick session ──────────────────────────────────────
+    if deployed:
+        listing = deployed[0]
+        dep_id = listing.deployment_id
+        task_id = f"{listing.slug}-train-easy-001"
+        print(f"\n-- Quick session: {listing.slug} --")
+        try:
+            session = client.create_environment_session(dep_id, task_id=task_id)
+            session = client.wait_for_session(session)
+            result = client.environment_step(
+                    session.session_id, "Analyzing the problem...",
+                    session_token=session.session_token,
+                )
+            print(f"  Reward: {result.reward}, Done: {result.done}")
+        except Exception as e:
+            print(f"  Session skipped: {e}")
 
-    # ── Inspect quality ──────────────────────────────────────────
-    print("\n── Quality Information ──")
-    badges = client.list_quality_badges(limit=5)
-    print(f"Quality badges available: {len(badges)}")
+    # ── Entitlements ─────────────────────────────────────────────
+    print("\n-- Your Entitlements --")
+    try:
+        entitlements = client.list_entitlements(limit=10)
+        print(f"  {len(entitlements)} entitlement(s)")
+    except Exception as e:
+        print(f"  {e}")
 
-    reports = client.list_quality_reports(report_type="qualification", limit=3)
-    print(f"Qualification reports: {len(reports)}")
-
-    # ── Check entitlements ───────────────────────────────────────
-    print("\n── Your Entitlements ──")
-    entitlements = client.list_entitlements(limit=10)
-    print(f"You have {len(entitlements)} entitlements")
-
-    # ── Billing overview ─────────────────────────────────────────
-    print("\n── Billing ──")
-    charges = client.list_session_charges(billable_only=True)
-    print(f"Billable charges: {len(charges)}")
-
-    summary = client.get_charge_summary()
-    print(f"Charge summary: {summary}")
+    # ── Billing ──────────────────────────────────────────────────
+    print("\n-- Credits --")
+    try:
+        balance = client.get_credit_balance()
+        print(f"  Balance: {balance.get('balance', '?')}")
+    except Exception:
+        print("  (credit balance not available)")
 
 
-def creator_workflow(client: Epsilab) -> None:
-    """Register a namespace, listing, and release (dry run)."""
+def publisher_workflow(client: Epsilab) -> None:
+    """Show the publisher side: namespaces, listings, analytics."""
 
-    print("\n── Creator Profile ──")
+    print("\n-- Publisher Profile --")
     try:
         profile = client.get_creator_profile()
-        print(f"Profile: {profile.get('display_name', 'unnamed')}")
+        print(f"  Profile: {profile.get('display_name', 'unnamed')}")
     except Exception:
-        print("No creator profile yet — creating one")
-        profile = client.create_creator_profile(
-            display_name="SDK Example Org",
-            bio="Example creator from the Python SDK",
-        )
-        print(f"Created profile: {profile.get('display_name')}")
+        print("  No creator profile yet")
 
-    print("\n── Creator Analytics ──")
-    aggregates = client.get_creator_aggregates(limit=5)
-    print(f"Releases with analytics: {len(aggregates)}")
-
-    print("\n── Settlement ──")
+    print("\n-- Your Namespaces --")
     try:
-        account = client.get_creator_account()
-        print(f"Balance: {account.get('balance_cents', 0)} cents")
+        namespaces = client.list_namespaces()
+        for ns in namespaces[:5]:
+            slug = ns.get("slug", "?")
+            ns_id = ns.get("namespace_id", "?")
+            print(f"    {slug:20s}  {ns_id}")
     except Exception as e:
-        print(f"No settlement account: {e}")
+        print(f"  {e}")
 
-    rules = client.list_royalty_rules()
-    print(f"Royalty rules: {len(rules)}")
+    print("\n-- Your Listings --")
+    listings = client.list_environment_listings(limit=10)
+    owned = [l for l in listings if l.is_owner]
+    print(f"  {len(owned)} owned listing(s)")
+    for l in owned[:5]:
+        print(f"    {l.slug:30s}  visibility={l.visibility}  moderation={l.moderation_state}")
 
-    accruals = client.list_accruals(status="pending")
-    print(f"Pending accruals: {len(accruals)}")
 
-    print("\n── Adapters ──")
-    adapters = client.list_adapters(limit=5)
-    print(f"Available adapters: {len(adapters)}")
-    for adapter in adapters[:3]:
-        print(f"  • {adapter.get('name', 'unnamed')} ({adapter.get('protocol_family', '?')})")
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Hub and marketplace workflow examples.")
+    p.add_argument("--publisher", action="store_true",
+                    help="Also run the publisher workflow")
+    return p.parse_args()
 
 
 def main() -> None:
+    args = parse_args()
     client = Epsilab(load_dotenv=True)
 
-    print("═" * 60)
-    print("Epsilab Environment Hub & Marketplace — SDK Example")
-    print("═" * 60)
+    print("=" * 60)
+    print("  Epsilab Environment Hub & Marketplace")
+    print("=" * 60)
 
-    buyer_workflow(client)
+    consumer_workflow(client)
 
-    if os.environ.get("EPSILAB_RUN_CREATOR_EXAMPLE") == "1":
-        creator_workflow(client)
+    if args.publisher:
+        publisher_workflow(client)
     else:
-        print("\n(Set EPSILAB_RUN_CREATOR_EXAMPLE=1 to run the creator workflow)")
+        print("\n  (Run with --publisher to see the publisher workflow)")
 
-    print("\n✓ Done")
+    print("\nDone")
     client.close()
 
 

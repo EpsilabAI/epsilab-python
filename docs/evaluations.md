@@ -1,13 +1,22 @@
-# Model Evaluations, Voice, Routing, and Capability Matrix (Deprecated)
+# Legacy Features (Deprecated)
 
-> **Deprecated**: These features are deprecated as of v0.15.0. The platform
-> is focused on the **RL Environment Hub** for post-training workflows.
-> These endpoints will remain functional until 2026-12-31 but will not
-> receive new features. See [`examples/run_environment.py`](../examples/run_environment.py)
-> and [`examples/grpo_training.py`](../examples/grpo_training.py) for
-> the recommended approach.
+> **Deprecated as of v0.15.0** — These APIs will remain functional until
+> 2026-12-31 but will not receive new features.
+>
+> **Use the RL Environment Hub instead.** The platform now focuses on
+> interactive RL environments for post-training. See:
+>
+> - `examples/example.py` — quickstart, discover environments, run a session
+> - `examples/run_environment.py` — collect data across multiple envs, train with SFT/DPO/KTO
+> - `examples/grpo_training.py` — online GRPO with live environment rewards
+> - `examples/batch_evaluation.py` — benchmark a model across environments
+>
+> All new development uses `create_environment_session()`, `environment_step()`,
+> and the hub discovery APIs (`list_environment_listings()`, etc.).
 
-## Model Evaluations
+---
+
+## Model Evaluations (deprecated)
 
 ```python
 # Compare multiple models side-by-side
@@ -42,9 +51,10 @@ client.export_run(run.run_id, format="dpo", path="output/dpo_pairs.jsonl")
 | `export_run(run_id, format, path)` | Export training data or reports |
 | `forge(run_id)` | Generate new tasks targeting gaps |
 
-## First-Party RL Environments
+## First-Party RL Environments (deprecated)
 
-Built-in task-based RL environments, separate from marketplace environments:
+> **Deprecated.** Use `create_environment_session()` and `environment_step()`
+> from the RL Environment Hub instead. See [API Reference](api-reference.md).
 
 | Method | Description |
 |--------|-------------|
@@ -59,7 +69,7 @@ Built-in task-based RL environments, separate from marketplace environments:
 | `list_rl_sessions(...)` | List your sessions |
 | `get_rl_stats(...)` | Get completion rates and reward distribution |
 
-## Voice Evaluations
+## Voice Evaluations (deprecated)
 
 | Method | Description |
 |--------|-------------|

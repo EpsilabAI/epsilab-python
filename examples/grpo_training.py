@@ -1,149 +1,325 @@
-"""Use Epsilab environments as live reward functions for GRPO training.
+"""Online GRPO: train a model with live environment rewards.
 
-Instead of training a static reward model, environments provide
-real-time, verifiable rewards. Each candidate completion is submitted
-to a sandboxed environment that returns a scalar reward based on
-actual execution (e.g. tests pass, code compiles, answer is correct).
+The model generates completions, Epsilab environments score them,
+and GRPO updates the policy. Uses a remote training provider
+(Tinker or Fireworks) so no local GPU is needed.
+
+GRPO requires online interaction (sample -> score -> update), so it
+can't use a managed fine-tuning API. For offline algorithms that
+work with pre-collected data (SFT, DPO, KTO), see run_environment.py.
 
 Usage:
-    pip install epsilab trl transformers datasets
-    export EPSILAB_API_KEY=sk-...
-    python examples/grpo_training.py
+    pip install epsilab[tinker]
+    epsilab login
+    export TINKER_API_KEY=...   # only if using --provider tinker
 
-What this does:
-    1. Searches the hub for a deployed environment
-    2. Builds a reward function backed by that environment
-    3. Wires it into TRL's GRPOTrainer for live training
+    # Single environment
+    python examples/grpo_training.py --envs bug-hunter
+
+    # Multiple environments (cycles through them each step)
+    python examples/grpo_training.py --envs bug-hunter,refactor,test-writer
+
+    # All environments
+    python examples/grpo_training.py --envs all --provider local --steps 50
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+from pathlib import Path
+
 from epsilab import Epsilab
 
 
-def make_reward_fn(client: Epsilab, deployment_id: str):
-    """Create a reward function backed by an Epsilab environment.
-
-    The returned function has the signature TRL expects:
-        reward_fn(completions, prompts, **kwargs) -> list[float]
-
-    Each completion is submitted to the environment as an action.
-    The environment scores it (runs tests, checks correctness, etc.)
-    and returns a reward.
-    """
-
-    def reward_fn(
-        completions: list[str],
-        prompts: list[str],
-        **kwargs,
-    ) -> list[float]:
-        task_ids = kwargs.get("task_ids", [None] * len(completions))
-        rewards = []
-        for completion, task_id in zip(completions, task_ids):
-            try:
-                session = client.create_environment_session(
-                    deployment_id,
-                    task_id=task_id or "default",
-                    seed=kwargs.get("seed"),
-                )
-                result = client.environment_step(
-                    session.session_id,
-                    completion,
-                    session_token=session.session_token,
-                )
-                rewards.append(result.reward or 0.0)
-            except Exception:
-                rewards.append(0.0)
-        return rewards
-
-    return reward_fn
+# ── Environment discovery ────────────────────────────────────────
 
 
-def find_deployment(client: Epsilab, domain: str = "coding") -> str | None:
-    """Find a deployed environment for the given domain."""
-    listings = client.search_environments(domain=domain, limit=20)
-    for env in listings:
-        dep_id = env.get("deployment_id") if isinstance(env, dict) else getattr(env, "deployment_id", None)
-        if dep_id:
-            title = env.get("title") if isinstance(env, dict) else getattr(env, "title", "?")
-            slug = env.get("slug") if isinstance(env, dict) else getattr(env, "slug", "?")
-            print(f"  Using: {title} ({slug})")
-            return dep_id
-    return None
+def resolve_environments(client: Epsilab, env_spec: str) -> list[dict]:
+    """Resolve --envs into a list of {slug, deployment_id, task_id} dicts."""
+    listings = client.list_environment_listings(limit=200)
+    available = [l for l in listings if l.deployment_id]
+
+    if env_spec == "all":
+        envs = [{"slug": l.slug, "deployment_id": l.deployment_id} for l in available]
+    else:
+        slugs = [s.strip() for s in env_spec.split(",") if s.strip()]
+        available_map = {l.slug: l for l in available}
+        envs = []
+        for slug in slugs:
+            if slug not in available_map:
+                avail = sorted(available_map.keys())[:15]
+                raise SystemExit(f"Environment '{slug}' not found.\nAvailable: {', '.join(avail)}")
+            l = available_map[slug]
+            envs.append({"slug": l.slug, "deployment_id": l.deployment_id})
+
+    for env in envs:
+        env["task_id"] = f"{env['slug']}-train-easy-001"
+    return envs
+
+
+# ── Scoring ──────────────────────────────────────────────────────
+
+
+def score_completions(
+    client: Epsilab,
+    deployment_id: str,
+    task_id: str,
+    prompts: list[str],
+    completions: list[str],
+) -> list[float]:
+    """Score completions by running them through an Epsilab environment."""
+    rewards = []
+    for prompt, completion in zip(prompts, completions):
+        try:
+            session = client.create_environment_session(deployment_id, task_id=task_id)
+            session = client.wait_for_session(session)
+            result = client.environment_step(
+                session.session_id, completion,
+                session_token=session.session_token,
+            )
+            rewards.append(result.reward or 0.0)
+        except Exception:
+            rewards.append(0.0)
+    return rewards
+
+
+# ── Tinker backend ───────────────────────────────────────────────
+
+
+def train_tinker(
+    epsilab_client: Epsilab, model_id: str, prompts: list[str],
+    environments: list[dict], n_steps: int,
+) -> None:
+    """Online GRPO using Tinker's training + sampling API."""
+    import asyncio
+
+    import numpy as np
+    import tinker
+    from tinker import types
+
+    async def _train():
+        client = tinker.ServiceClient()
+        training_client = await client.create_lora_training_client_async(base_model=model_id, rank=16)
+        sampling_client = await training_client.save_weights_and_get_sampling_client()
+        num_generations = 4
+
+        for step in range(n_steps):
+            env = environments[step % len(environments)]
+            prompt = prompts[step % len(prompts)]
+
+            completions = []
+            for _ in range(num_generations):
+                response = await sampling_client.sample_async(prompt=prompt, max_tokens=256, temperature=0.8)
+                completions.append(response.text)
+
+            rewards = score_completions(
+                epsilab_client, env["deployment_id"], env["task_id"],
+                [prompt] * num_generations, completions,
+            )
+
+            mean_reward = np.mean(rewards)
+            advantages = [(r - mean_reward) for r in rewards]
+            best_idx = int(np.argmax(rewards))
+
+            datum = tinker.tokenize_chat(
+                messages=[
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": completions[best_idx]},
+                ],
+                model=model_id,
+            )
+            weights = np.array(datum.loss_fn_inputs["weights"].data, dtype=np.float32)
+            weights *= max(0, advantages[best_idx])
+            datum.loss_fn_inputs["weights"] = tinker.NumpyData(weights)
+
+            fb = await training_client.forward_backward_async([datum], "cross_entropy")
+            optim = await training_client.optim_step_async(types.AdamParams(learning_rate=5e-5))
+            fb_result = await fb.result_async()
+            await optim.result_async()
+
+            loss = fb_result.metrics.get("loss:mean", 0)
+            print(
+                f"  Step {step:2d} [{env['slug']}]: loss={loss:.4f}  "
+                f"reward=[{', '.join(f'{r:.3f}' for r in rewards)}]  "
+                f"mean={mean_reward:.3f}"
+            )
+
+            if (step + 1) % 5 == 0:
+                sampling_client = await training_client.save_weights_and_get_sampling_client()
+
+        await training_client.save_weights_and_get_sampling_client()
+        print(f"\n  Training complete. Model checkpoint saved on Tinker.")
+
+    asyncio.run(_train())
+
+
+# ── Fireworks backend ────────────────────────────────────────────
+
+
+def train_fireworks(
+    epsilab_client: Epsilab, model_id: str, prompts: list[str],
+    environments: list[dict], n_steps: int,
+) -> None:
+    """Online GRPO using Fireworks Training API."""
+    import asyncio
+
+    import numpy as np
+    from fireworks.training.sdk import FiretitanServiceClient
+
+    async def _train():
+        fw_model = f"accounts/fireworks/models/{model_id.split('/')[-1].lower()}"
+        service = FiretitanServiceClient.from_firetitan_config(
+            api_key=None, base_model=fw_model, tokenizer_model=model_id,
+            lora_rank=16, learning_rate=5e-5, cleanup_trainer_on_close=True,
+        )
+        training_client = service.create_training_client(base_model=fw_model, lora_rank=16)
+        sampler = service.create_deployment_sampler()
+        num_generations = 4
+
+        for step in range(n_steps):
+            env = environments[step % len(environments)]
+            prompt = prompts[step % len(prompts)]
+
+            completions = []
+            for _ in range(num_generations):
+                response = await sampler.sample_async(prompt=prompt, max_tokens=256)
+                completions.append(response.text)
+
+            rewards = score_completions(
+                epsilab_client, env["deployment_id"], env["task_id"],
+                [prompt] * num_generations, completions,
+            )
+            mean_reward = np.mean(rewards)
+            best_idx = int(np.argmax(rewards))
+            print(
+                f"  Step {step:2d} [{env['slug']}]: "
+                f"reward=[{', '.join(f'{r:.3f}' for r in rewards)}]  mean={mean_reward:.3f}"
+            )
+
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            text = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt},
+                 {"role": "assistant", "content": completions[best_idx]}],
+                tokenize=False,
+            )
+            import tinker
+            datum = tinker.Datum.from_text(text, model=model_id)
+            weights = np.array(datum.loss_fn_inputs["weights"].data, dtype=np.float32)
+            weights *= max(0, rewards[best_idx] - mean_reward)
+            datum.loss_fn_inputs["weights"] = tinker.NumpyData(weights)
+
+            training_client.forward_backward_custom([datum], lambda d, lp: None).result()
+            training_client.optim_step(tinker.AdamParams(learning_rate=5e-5)).result()
+
+        print(f"\n  Training complete.")
+
+    asyncio.run(_train())
+
+
+# ── TRL local backend ───────────────────────────────────────────
+
+
+def train_local(
+    epsilab_client: Epsilab, model_id: str, prompts: list[str],
+    environments: list[dict], n_steps: int,
+) -> None:
+    """Online GRPO using TRL's GRPOTrainer (requires local GPU)."""
+    from datasets import Dataset
+    from trl import GRPOConfig, GRPOTrainer
+
+    dataset = Dataset.from_dict({"prompt": prompts})
+
+    env = environments[0]
+
+    def reward_fn(*, prompts, completions, **kwargs) -> list[float]:
+        texts = [c if isinstance(c, str) else str(c) for c in completions]
+        return score_completions(epsilab_client, env["deployment_id"], env["task_id"], prompts, texts)
+
+    import torch
+    use_gpu = torch.cuda.is_available()
+    config = GRPOConfig(
+        output_dir="output/grpo-finetuned",
+        per_device_train_batch_size=1,
+        num_generations=4,
+        max_steps=n_steps,
+        logging_steps=1,
+        report_to="none",
+        bf16=use_gpu,
+        use_cpu=not use_gpu,
+    )
+
+    trainer = GRPOTrainer(model=model_id, args=config, train_dataset=dataset, reward_funcs=reward_fn)
+    trainer.train()
+    trainer.save_model("output/grpo-finetuned")
+    print("  Saved to output/grpo-finetuned/")
+
+
+# ── Main ─────────────────────────────────────────────────────────
+
+TRAINERS = {
+    "tinker": train_tinker,
+    "fireworks": train_fireworks,
+    "local": train_local,
+}
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Online GRPO training with live environment rewards.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--envs", default="bug-hunter",
+                    help='Comma-separated slugs or "all" (default: bug-hunter)')
+    p.add_argument("--model", default="Qwen/Qwen3-8B",
+                    help="Model ID to train (default: Qwen/Qwen3-8B)")
+    p.add_argument("--provider", choices=TRAINERS.keys(), default="tinker",
+                    help="Training backend (default: tinker)")
+    p.add_argument("--steps", type=int, default=20,
+                    help="Number of GRPO training steps (default: 20)")
+    return p.parse_args()
 
 
 def main():
-    client = Epsilab(load_dotenv=True)
+    args = parse_args()
+    epsilab_client = Epsilab(load_dotenv=True)
 
-    print("Searching for a deployed coding environment...")
-    deployment_id = find_deployment(client, domain="coding")
+    print("\n  Resolving environments ...")
+    environments = resolve_environments(epsilab_client, args.envs)
+    print(f"  {len(environments)} environment(s): {', '.join(e['slug'] for e in environments)}")
 
-    if not deployment_id:
-        print("No deployed environments found.")
-        print("Deploy one first:  epsilab env init my-env && cd my-env && epsilab deploy")
-        print("Or run:  python examples/run_environment.py  for the full workflow")
-        client.close()
-        return
-
-    reward_fn = make_reward_fn(client, deployment_id)
-
-    print("\nTesting reward function with a sample completion...")
-    test_rewards = reward_fn(
-        completions=["def fibonacci(n): return n if n <= 1 else fibonacci(n-1) + fibonacci(n-2)"],
-        prompts=["Write a fibonacci function"],
-        task_ids=["task-001"],
-    )
-    print(f"  Reward: {test_rewards[0]:.3f}")
-
-    # ── Wire into TRL ────────────────────────────────────────────
-    try:
-        from datasets import Dataset
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        from trl import GRPOConfig, GRPOTrainer
-    except ImportError:
-        print("\nTo run training, install:  pip install trl transformers datasets torch")
-        print("\nOnce installed, the integration is:")
-        print("  reward_fn = make_reward_fn(client, deployment_id)")
-        print("  trainer = GRPOTrainer(model=model, reward_funcs=[reward_fn], ...)")
-        print("  trainer.train()")
-        client.close()
-        return
-
-    model_name = "Qwen/Qwen3-0.6B"
-    print(f"\nLoading {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+    print("=" * 60)
+    print(f"  Environments: {', '.join(e['slug'] for e in environments)}")
+    print(f"  Model:        {args.model}")
+    print(f"  Provider:     {args.provider}")
+    print(f"  Steps:        {args.steps}")
+    print("=" * 60)
 
     prompts = [
-        "Write a function that reverses a string",
-        "Write a function that checks if a number is prime",
-        "Write a function that computes factorial",
+        "Debug this function and explain the root cause.",
+        "Write a comprehensive test suite for this module.",
+        "Review this pull request for correctness and style issues.",
+        "Refactor this code to improve readability and maintainability.",
+        "Fix the failing CI pipeline and explain what went wrong.",
     ]
-    dataset = Dataset.from_dict({"prompt": prompts})
 
-    config = GRPOConfig(
-        output_dir="output/grpo-live-reward",
-        num_train_epochs=1,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=2,
-        logging_steps=1,
-        max_steps=10,
-    )
+    print(f"\n  Training for {args.steps} steps across {len(environments)} env(s)")
+    print(f"  Each step: sample 4 completions, score via environment, update\n")
 
-    trainer = GRPOTrainer(
-        model=model,
-        args=config,
-        train_dataset=dataset,
-        reward_funcs=[reward_fn],
-        processing_class=tokenizer,
-    )
+    try:
+        TRAINERS[args.provider](epsilab_client, args.model, prompts, environments, args.steps)
+    except ImportError as e:
+        deps = {
+            "tinker": "pip install tinker tinker-cookbook",
+            "fireworks": "pip install 'fireworks-ai[training]'",
+            "local": "pip install trl transformers datasets torch",
+        }
+        print(f"\n  Missing: {e}")
+        print(f"  Install with: {deps[args.provider]}")
 
-    print("Starting GRPO training with live environment rewards...")
-    trainer.train()
-    trainer.save_model("output/grpo-live-reward")
-    print(f"\nModel saved to output/grpo-live-reward/")
-
-    client.close()
+    print("\n" + "=" * 60)
+    epsilab_client.close()
 
 
 if __name__ == "__main__":

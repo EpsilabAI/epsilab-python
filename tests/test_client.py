@@ -630,6 +630,8 @@ class TestConfiguration:
             "EPSILAB_API_KEY=sk-dotenv\nEPSILAB_API_BASE=https://dotenv.example.com\n",
             encoding="utf-8",
         )
+        import epsilab.client as _client_mod
+        monkeypatch.setattr(_client_mod, "_CREDENTIALS_FILE", tmp_path / "nonexistent.json")
 
         client = Epsilab()
         try:
@@ -651,6 +653,25 @@ class TestConfiguration:
         try:
             assert client.api_base == "https://dotenv.example.com"
             assert client._client.headers["Authorization"] == "Bearer sk-dotenv"
+        finally:
+            client.close()
+
+    def test_loads_stored_credentials(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("EPSILAB_API_KEY", raising=False)
+        monkeypatch.delenv("EPSILAB_API_BASE", raising=False)
+        import epsilab.client as _client_mod
+
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(
+            '{"profiles":{"default":{"api_key":"sk-stored"}},"active_profile":"default","api_base":"https://stored.example.com"}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(_client_mod, "_CREDENTIALS_FILE", creds_file)
+
+        client = Epsilab()
+        try:
+            assert client._client.headers["Authorization"] == "Bearer sk-stored"
+            assert client.api_base == "https://stored.example.com"
         finally:
             client.close()
 

@@ -13,7 +13,11 @@ Epsilab is an open hub for RL environments. Search, run, and export training dat
 ## Installation
 
 ```bash
-pip install epsilab
+pip install epsilab                  # SDK + CLI only
+pip install epsilab[training]        # + TRL, Together AI, torch
+pip install epsilab[tinker]          # + Tinker (custom training loops)
+pip install epsilab[fireworks]       # + Fireworks AI
+pip install epsilab[all]             # everything
 ```
 
 ## Quick Start
@@ -35,39 +39,58 @@ One command builds, uploads, and registers. No registry credentials needed.
 ```python
 from epsilab import Epsilab
 
-client = Epsilab(api_key="sk-...")
+# Credentials are loaded automatically from `epsilab login`
+client = Epsilab()
 
-# Find environments
-envs = client.search_environments(domain="coding", min_quality_score=0.8)
+# Browse the hub
+listings = client.list_environment_listings(limit=20)
+for l in listings:
+    print(f"{l.slug:30s}  {l.title}")
 
 # Create a session and interact
-session = client.create_environment_session("deployment-id", task_id="task-001", seed=42)
+session = client.create_environment_session(
+    listings[0].deployment_id,
+    task_id="bug-hunter-easy-train-001",
+    seed=42,
+)
 result = client.environment_step(
     session.session_id,
-    "def fibonacci(n): ...",
+    "The bug is a missing null check in the handler.",
     session_token=session.session_token,
 )
 print(f"Reward: {result.reward}, Done: {result.done}")
 
 # Export training data
-export = client.create_environment_export(deployment_id="deployment-id", format="grpo")
+export = client.create_environment_export(
+    deployment_id=listings[0].deployment_id,
+    format="grpo",
+)
 ```
 
-### TRL GRPO integration
+### Post-training with multiple environments
 
-```python
-def reward_fn(completions, task_ids, **kwargs):
-    rewards = []
-    for completion, task_id in zip(completions, task_ids):
-        session = client.create_environment_session("deployment-id", task_id=task_id)
-        result = client.environment_step(
-            session.session_id,
-            completion,
-            session_token=session.session_token,
-        )
-        rewards.append(result.reward or 0.0)
-    return rewards
+For generalist RL post-training, train across diverse environments
+simultaneously — coding, ops, business, etc.:
+
+```bash
+# Collect data from 3 envs, format as DPO, train locally
+python examples/run_environment.py \
+    --envs bug-hunter,refactor,test-writer \
+    --algorithm dpo \
+    --provider local
+
+# Online GRPO across all available envs
+python examples/grpo_training.py --envs all --provider tinker --steps 100
 ```
+
+The example scripts support any training provider:
+
+| Provider | Install | Description |
+|----------|---------|-------------|
+| `together` | `pip install epsilab[training]` | Managed fine-tuning via Together AI |
+| `fireworks` | `pip install epsilab[fireworks]` | Managed fine-tuning via Fireworks AI |
+| `tinker` | `pip install epsilab[tinker]` | Custom training loops on remote GPUs |
+| `local` | `pip install epsilab[training]` | TRL on local GPU (SFT/DPO/KTO/GRPO) |
 
 ## Creating an Environment
 
@@ -139,9 +162,16 @@ All commands support `--json` for machine-readable output and `-v` for verbose l
 
 ## Configuration
 
+The SDK resolves credentials in order:
+1. Explicit `api_key=` constructor argument
+2. `EPSILAB_API_KEY` environment variable
+3. `~/.epsilab/credentials.json` (set by `epsilab login`)
+
+Most users just need `epsilab login` — no env vars or code changes required.
+
 | Environment Variable | Constructor Param | Description |
 |---|---|---|
-| `EPSILAB_API_KEY` | `api_key` | Your API key |
+| `EPSILAB_API_KEY` | `api_key` | Your API key (overrides stored credentials) |
 | `EPSILAB_API_BASE` | `api_base` | API base URL (default: production) |
 | `EPSILAB_HTTP_TIMEOUT` | `timeout_seconds` | Request timeout in seconds (default: 120) |
 | | `max_retries` | Auto-retry count for 429/5xx (default: 3) |
@@ -152,7 +182,7 @@ All commands support `--json` for machine-readable output and `-v` for verbose l
 ```python
 from epsilab import Epsilab, AuthError, InsufficientCreditsError, RateLimitError, ApiError
 
-client = Epsilab(api_key="sk-...")
+client = Epsilab()
 
 try:
     session = client.create_environment_session("dep-id", task_id="task-001")
@@ -168,19 +198,30 @@ The SDK retries automatically on rate limits (429) and transient server errors (
 
 ## Examples
 
-| Script | Description |
+| Script | What it does |
 |--------|-------------|
-| [`examples/run_environment.py`](examples/run_environment.py) | **Start here** — e2e post-training: discover environments, collect data, fine-tune with TRL |
-| [`examples/grpo_training.py`](examples/grpo_training.py) | Use environments as live reward functions for TRL GRPO |
-| [`examples/batch_evaluation.py`](examples/batch_evaluation.py) | Batch evaluation across tasks with server-side parallelism |
-| [`examples/marketplace_example.py`](examples/marketplace_example.py) | Creator and buyer marketplace workflows |
+| [`examples/example.py`](examples/example.py) | **Start here** — discover envs, run one session, see rewards |
+| [`examples/run_environment.py`](examples/run_environment.py) | Collect data across multiple envs, train with SFT/DPO/KTO |
+| [`examples/grpo_training.py`](examples/grpo_training.py) | Online GRPO with live environment rewards |
+| [`examples/batch_evaluation.py`](examples/batch_evaluation.py) | Benchmark a model across envs with server-side batches |
+| [`examples/marketplace_example.py`](examples/marketplace_example.py) | Consumer and publisher hub workflows |
+
+All examples use `argparse` — run with `--help` for options. Key flags:
+
+```bash
+python examples/run_environment.py \
+    --envs bug-hunter,refactor,test-writer \
+    --algorithm dpo \
+    --provider local \
+    --sessions-per-env 20
+```
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
 | [API Reference](docs/api-reference.md) | Full method reference for all SDK features |
-| [Evaluations & More](docs/evaluations.md) | Model evaluations, voice, routing, capability matrix |
+| [Evaluations (deprecated)](docs/evaluations.md) | Legacy evaluations, voice, routing — will be removed 2026-12-31 |
 
 ## License
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epsilab"
-version = "0.15.2"
+version = "0.16.0"
 description = "Python SDK and CLI for the Epsilab RL Environment Hub and Marketplace."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -27,6 +27,28 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
   "Operating System :: OS Independent",
   "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+training = [
+  "trl>=1.0",
+  "transformers>=4.45",
+  "datasets>=4.0",
+  "torch>=2.0",
+  "together>=2.0",
+]
+tinker = [
+  "tinker",
+  "tinker-cookbook",
+  "numpy",
+]
+fireworks = [
+  "fireworks-ai[training]",
+]
+all = [
+  "epsilab[training]",
+  "epsilab[tinker]",
+  "epsilab[fireworks]",
 ]
 
 [project.scripts]

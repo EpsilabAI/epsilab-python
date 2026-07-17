@@ -7,6 +7,7 @@ data export.  Importable as ``from epsilab import Epsilab``.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -47,6 +48,21 @@ _request_logger = logging.getLogger("epsilab.http")
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BACKOFF_BASE = 1.0
+_CREDENTIALS_FILE = Path.home() / ".epsilab" / "credentials.json"
+
+
+def _load_stored_credentials() -> tuple[Optional[str], Optional[str]]:
+    """Read API key and base URL from ~/.epsilab/credentials.json (set by ``epsilab login``)."""
+    try:
+        if not _CREDENTIALS_FILE.exists():
+            return None, None
+        data = json.loads(_CREDENTIALS_FILE.read_text())
+        profile = data.get("active_profile", "default")
+        profiles = data.get("profiles", {})
+        creds = profiles.get(profile, {})
+        return creds.get("api_key"), data.get("api_base")
+    except Exception:
+        return None, None
 _QUALITY_REPORT_TYPES = frozenset(
     {
         "protocol_conformance",
@@ -68,8 +84,9 @@ class EpsilabClient:
     Args:
         api_base: Base URL for the API. Defaults to ``EPSILAB_API_BASE``
             env var or the production URL.
-        api_key: API key for authentication. Defaults to ``EPSILAB_API_KEY``
-            env var.
+        api_key: API key for authentication. Resolved in order:
+            explicit argument, ``EPSILAB_API_KEY`` env var, then
+            ``~/.epsilab/credentials.json`` (set by ``epsilab login``).
         timeout_seconds: HTTP timeout. Defaults to ``EPSILAB_HTTP_TIMEOUT``
             env var or 120 seconds.
         max_retries: Number of automatic retries for rate-limit (429) and
@@ -116,7 +133,12 @@ class EpsilabClient:
             else 120
         )
 
-        self._api_key: Optional[str] = api_key or config_value("EPSILAB_API_KEY")
+        resolved_key = api_key or config_value("EPSILAB_API_KEY")
+        if not resolved_key:
+            resolved_key, stored_base = _load_stored_credentials()
+            if stored_base and not api_base and not config_value("EPSILAB_API_BASE"):
+                self.api_base = stored_base.rstrip("/")
+        self._api_key: Optional[str] = resolved_key
         self._max_retries = max_retries
         self._backoff_base = backoff_base
 
@@ -2620,6 +2642,33 @@ class EpsilabClient:
         )
         return EnvironmentSession.from_dict(data)
 
+    def wait_for_session(
+        self,
+        session: "EnvironmentSession",
+        *,
+        poll_interval: float = 1.0,
+        timeout: float = 120.0,
+    ) -> "EnvironmentSession":
+        """Poll until a provisioning session becomes active (or terminal).
+
+        Args:
+            session: The session returned by :meth:`create_environment_session`.
+            poll_interval: Seconds between status polls.
+            timeout: Maximum seconds to wait before raising ``TimeoutError``.
+
+        Returns:
+            The updated :class:`~epsilab.models.EnvironmentSession`.
+        """
+        import time as _time
+
+        deadline = _time.monotonic() + timeout
+        while session.status == "provisioning":
+            if _time.monotonic() > deadline:
+                raise TimeoutError(f"Session {session.session_id} did not become active within {timeout}s")
+            _time.sleep(poll_interval)
+            session = self.get_environment_session(session.session_id)
+        return session
+
     def environment_step(
         self,
         session_id: str,
@@ -2653,6 +2702,7 @@ class EpsilabClient:
             "POST",
             f"/v1/environment-sessions/{self._path_segment(session_id)}/step",
             json_body={"action": action},
+            extra_headers=extra_headers,
         )
         return EnvironmentStepResult.from_dict(data)
 
