@@ -170,7 +170,7 @@ The SDK retries automatically on rate limits (429) and transient server errors (
 
 | Script | Description |
 |--------|-------------|
-| [`examples/run_environment.py`](examples/run_environment.py) | Browse, run sessions, inspect trajectories, export data |
+| [`examples/run_environment.py`](examples/run_environment.py) | **Start here** — e2e post-training: discover environments, collect data, fine-tune with TRL |
 | [`examples/grpo_training.py`](examples/grpo_training.py) | Use environments as live reward functions for TRL GRPO |
 | [`examples/batch_evaluation.py`](examples/batch_evaluation.py) | Batch evaluation across tasks with server-side parallelism |
 | [`examples/marketplace_example.py`](examples/marketplace_example.py) | Creator and buyer marketplace workflows |

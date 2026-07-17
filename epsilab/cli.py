@@ -38,8 +38,8 @@ _CONFIG_FILE = _CONFIG_DIR / "credentials.json"
 
 _DEFAULT_PROFILE = "default"
 
-_DASHBOARD_URL = "https://epsilab.com"
-_DOCS_URL = "https://epsilab.com"  # docs are in-app
+_DASHBOARD_URL = "https://app.epsilab.com"
+_DOCS_URL = "https://app.epsilab.com"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

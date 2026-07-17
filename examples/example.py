@@ -1,4 +1,9 @@
-"""Example: evaluate models and explore results via the Epsilab SDK.
+"""(Deprecated) Evaluate models via the Capability Radar pipeline.
+
+.. deprecated::
+    The evaluation pipeline is deprecated as of v0.15.0. The platform now
+    focuses on the RL Environment Hub for post-training workflows.
+    See ``run_environment.py`` for the recommended starting point.
 
 Usage:
     1. Copy ``.env.example`` to ``.env`` and add your API key.
