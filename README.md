@@ -4,7 +4,7 @@ Python SDK and CLI for the [Epsilab](https://www.epsilab.com) RL Environment Hub
 
 ## What is Epsilab?
 
-Epsilab is an open hub for RL environments — like HuggingFace, but for RL. Search, run, and export training data from hosted environments, or publish your own with a single command.
+Epsilab is an open hub for RL environments. Search, run, and export training data from hosted environments, or publish your own with a single command.
 
 - **Researchers and teams training models** — search and run environments, export GRPO/DPO/SFT/KTO training data, batch evaluation
 - **Environment builders** — publish with `epsilab deploy`, immutable content-addressed releases, usage analytics

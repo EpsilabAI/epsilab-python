@@ -599,6 +599,16 @@ class EnvironmentListing:
     network_policy: Optional[str] = None
     trace_policy: Optional[str] = None
     export_policy: Optional[str] = None
+    domain: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    star_count: int = 0
+    starred_by_me: bool = False
+    total_sessions: int = 0
+    completed_sessions: int = 0
+    mean_reward: Optional[float] = None
+    unique_users: int = 0
+    review_count: int = 0
+    avg_rating: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -631,6 +641,16 @@ class EnvironmentListing:
             network_policy=data.get("network_policy"),
             trace_policy=data.get("trace_policy"),
             export_policy=data.get("export_policy"),
+            domain=data.get("domain"),
+            tags=data.get("tags") or [],
+            star_count=int(data.get("star_count", 0)),
+            starred_by_me=bool(data.get("starred_by_me", False)),
+            total_sessions=int(data.get("total_sessions", 0)),
+            completed_sessions=int(data.get("completed_sessions", 0)),
+            mean_reward=data.get("mean_reward"),
+            unique_users=int(data.get("unique_users", 0)),
+            review_count=int(data.get("review_count", 0)),
+            avg_rating=data.get("avg_rating"),
         )
 
 

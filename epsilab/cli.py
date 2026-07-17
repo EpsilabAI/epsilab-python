@@ -481,7 +481,7 @@ def _deterministic_idem_key(prefix: str, **fields: object) -> str:
     return f"{prefix}-{h}"
 
 
-# ── deploy (top-level, Vercel-style) ────────────────────────────────
+# ── deploy (top-level) ──────────────────────────────────────────────
 
 _PROJECT_DIR = ".epsilab"
 _PROJECT_FILE = "project.json"
@@ -2913,7 +2913,7 @@ def build_parser() -> argparse.ArgumentParser:
     whoami_p = sub.add_parser("whoami", help="Show current authentication status")
     whoami_p.set_defaults(func=cmd_whoami)
 
-    # ── deploy (top-level, Vercel-style) ────────────────────────
+    # ── deploy (top-level) ──────────────────────────────────────
     deploy_p = sub.add_parser(
         "deploy",
         help="Build, push, and register an environment or tool (one command)",
