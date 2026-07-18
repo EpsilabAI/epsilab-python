@@ -2399,6 +2399,9 @@ class EpsilabClient:
     def list_environment_listings(
         self,
         *,
+        query: Optional[str] = None,
+        domain: Optional[str] = None,
+        sort_by: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> List["EnvironmentListing"]:
@@ -2407,16 +2410,26 @@ class EpsilabClient:
         Returns public listings, your own listings, and shared listings you can discover.
 
         Args:
-            limit: Max results (1-200, default 50).
+            query: Optional free-text search query.
+            domain: Optional exact domain filter.
+            sort_by: Optional order: ``popular``, ``recent``, ``stars``, or ``name``.
+            limit: Max results (1-100, default 50).
             offset: Pagination offset.
 
         Returns:
             List of :class:`~epsilab.models.EnvironmentListing`.
         """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if query:
+            params["q"] = query
+        if domain:
+            params["domain"] = domain
+        if sort_by:
+            params["sort_by"] = sort_by
         data = self._request(
             "GET",
             "/v1/environment-listings",
-            params={"limit": limit, "offset": offset},
+            params=params,
         )
         items = data if isinstance(data, list) else data.get("listings", data.get("items", []))
         return [EnvironmentListing.from_dict(d) for d in items]

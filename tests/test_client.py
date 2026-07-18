@@ -2057,11 +2057,20 @@ class TestListEnvironmentListings:
             )
 
         client = _make_client(httpx.MockTransport(capture))
-        result = client.list_environment_listings(limit=10, offset=5)
+        result = client.list_environment_listings(
+            query="agent tools",
+            domain="software-engineering",
+            sort_by="stars",
+            limit=10,
+            offset=5,
+        )
         assert captured["method"] == "GET"
         assert captured["path"] == "/v1/environment-listings"
         assert captured["params"]["limit"] == "10"
         assert captured["params"]["offset"] == "5"
+        assert captured["params"]["q"] == "agent tools"
+        assert captured["params"]["domain"] == "software-engineering"
+        assert captured["params"]["sort_by"] == "stars"
         assert len(result) == 1
         assert isinstance(result[0], EnvironmentListing)
         assert result[0].listing_id == "lst-1"

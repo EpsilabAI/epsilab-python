@@ -335,11 +335,9 @@ def cmd_env_list(args: argparse.Namespace) -> None:
         if args.json:
             _json_out([listing.to_dict() for listing in listings])
         else:
-            _ok(f"Your environments ({len(listings)}):\n")
+            _ok(f"Environments ({len(listings)}):\n")
             if not listings:
-                _ok("  No environments yet. Get started:")
-                _ok("    epsilab env init my-env")
-                _ok(f"  Or browse the marketplace at {_DASHBOARD_URL}\n")
+                _ok(f"  No environments found. Browse the hub at {_DASHBOARD_URL}\n")
             rows = [
                 {
                     "id": listing.listing_id,
@@ -360,12 +358,22 @@ def cmd_env_list(args: argparse.Namespace) -> None:
 def cmd_env_search(args: argparse.Namespace) -> None:
     client = _get_client()
     try:
-        results = client.search_environments(
-            query=args.query,
-            domain=args.domain,
-            min_quality_score=args.min_quality,
-            limit=args.limit,
-        )
+        if args.min_quality is not None:
+            results = client.search_environments(
+                query=args.query,
+                domain=args.domain,
+                min_quality_score=args.min_quality,
+                limit=args.limit,
+            )
+        else:
+            results = [
+                listing.to_dict()
+                for listing in client.list_environment_listings(
+                    query=args.query,
+                    domain=args.domain,
+                    limit=args.limit,
+                )
+            ]
         if args.json:
             _json_out(results)
         else:
@@ -3871,7 +3879,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_p.set_defaults(func=cmd_env_verify)
 
     # env list
-    list_p = env_sub.add_parser("list", help="List your environment listings")
+    list_p = env_sub.add_parser("list", help="List environment listings")
     list_p.add_argument("--limit", type=int, default=50)
     list_p.add_argument("--json", action="store_true", help="Output as JSON")
     list_p.set_defaults(func=cmd_env_list)
