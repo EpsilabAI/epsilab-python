@@ -949,6 +949,40 @@ def _resolve_tool(client: EpsilabClient, namespace_id: str, slug: str, title: st
         raise
 
 
+def _resolve_tool_bindings(client: EpsilabClient, plugin_slugs: list[str]) -> list[dict[str, str]]:
+    """Resolve plugin slugs to application_tools binding dicts for release creation."""
+    if not plugin_slugs:
+        return []
+    import hashlib as _hashlib
+    tools = client.list_application_tools(limit=100)
+    slug_to_tool = {t.slug: t for t in tools}
+    bindings: list[dict[str, str]] = []
+    for slug in plugin_slugs:
+        tool = slug_to_tool.get(slug)
+        if tool is None:
+            _warn(f"  Tool '{slug}' not found — skipping binding")
+            continue
+        rec_release_id = getattr(tool, "recommended_release_id", None)
+        if not rec_release_id:
+            try:
+                detail = client._request("GET", f"/v1/application-tools/{tool.tool_id}")
+                rec_release_id = detail.get("recommended_release_id")
+            except Exception:
+                pass
+        if not rec_release_id:
+            _warn(f"  Tool '{slug}' has no release — skipping binding")
+            continue
+        config_digest = "sha256:" + _hashlib.sha256(
+            f"{slug}:default".encode()
+        ).hexdigest()
+        bindings.append({
+            "tool_release_id": str(rec_release_id),
+            "dependency_alias": slug,
+            "configuration_digest": config_digest,
+        })
+    return bindings
+
+
 def _deploy_tool(
     args: argparse.Namespace, client: EpsilabClient,
     directory: Path, detected: dict, project: dict, namespace_id: str,
@@ -1168,6 +1202,11 @@ def _deploy_environment(
     ver_release_id = str(ver.get("release_id", ver.get("id", "")))
     status("Verifier registered", ok=True)
 
+    plugin_slugs = project.get("plugins", [])
+    tool_bindings = _resolve_tool_bindings(client, plugin_slugs) if plugin_slugs else []
+    if tool_bindings:
+        status(f"Resolved {len(tool_bindings)} tool binding(s)", ok=True)
+
     env_idem = _deterministic_idem_key("env", listing_id=listing_id, version=version, digest=digest)
     try:
         release = client.create_environment_release(
@@ -1185,6 +1224,7 @@ def _deploy_environment(
                 "architecture": "amd64", "network_policy": "deny",
                 "runtime_interface": "openenv",
             },
+            application_tools=tool_bindings or None,
             idempotency_key=env_idem,
         )
     except ApiError as e:
@@ -1390,6 +1430,11 @@ def cmd_env_push(args: argparse.Namespace) -> None:
         env_obs_schema = env_config.get("observation_schema_digest", "")
         env_resource_policy = env_config.get("resource_policy")
 
+        push_plugin_slugs = manifest.get("plugins", env_config.get("plugins", []))
+        push_tool_bindings = _resolve_tool_bindings(client, push_plugin_slugs) if push_plugin_slugs else []
+        if push_tool_bindings:
+            _ok(f"  Resolved {len(push_tool_bindings)} tool binding(s)")
+
         env_idem = _deterministic_idem_key(
             "env", listing_id=listing_id, version=version,
             runtime_digest=env_runtime_digest,
@@ -1406,6 +1451,7 @@ def cmd_env_push(args: argparse.Namespace) -> None:
             action_schema_digest=env_action_schema,
             observation_schema_digest=env_obs_schema,
             resource_policy=env_resource_policy,
+            application_tools=push_tool_bindings or None,
             idempotency_key=env_idem,
         )
         _ok(f"  Environment release registered: {release.release_id}")
@@ -1478,10 +1524,56 @@ def cmd_env_grant(args: argparse.Namespace) -> None:
             license_id=args.license or "apache-2.0",
             expires_at=args.expires_at,
         )
-        _ok(f"Entitlement granted: {ent.get('entitlement_id', '?')}")
-        _ok(f"  tenant: {args.tenant_id}")
-        _ok(f"  listing: {args.listing_id}")
-        _ok(f"\nManage entitlements at {_DASHBOARD_URL} (My Environments)")
+        _ok(f"Access shared: {ent.get('entitlement_id', '?')}")
+        _ok(f"  organization: {args.tenant_id}")
+        _ok(f"  environment:  {args.listing_id}")
+        env_title = ent.get("environment_title") or ent.get("environment_slug") or ""
+        if env_title:
+            _ok(f"  ({env_title})")
+        _ok(f"\nManage shared access at {_DASHBOARD_URL} (Environments > Shared)")
+    except EpsilabError as e:
+        _err(_friendly_error(e))
+    finally:
+        client.close()
+
+
+def cmd_env_revoke(args: argparse.Namespace) -> None:
+    """Revoke shared access to an environment."""
+    client = _get_client()
+    try:
+        ent = client.revoke_entitlement(args.entitlement_id)
+        _ok(f"Access revoked: {args.entitlement_id}")
+        env_title = ent.get("environment_title") or ent.get("environment_slug") or ""
+        if env_title:
+            _ok(f"  environment: {env_title}")
+    except EpsilabError as e:
+        _err(_friendly_error(e))
+    finally:
+        client.close()
+
+
+def cmd_env_shared(args: argparse.Namespace) -> None:
+    """List shared environments."""
+    client = _get_client()
+    try:
+        entitlements = client.list_entitlements(limit=100)
+        active = [e for e in entitlements if e.get("status") == "active"]
+        if not active:
+            _ok("No shared environments.")
+            return
+        _ok(f"Shared environments ({len(active)} active):\n")
+        for e in active:
+            env_name = e.get("environment_namespace", "?") + "/" + e.get("environment_slug", "?")
+            env_title = e.get("environment_title", "")
+            grantee = e.get("grantee_name") or e.get("grantee_tenant_id", "?")[:12]
+            owner = e.get("owner_name") or e.get("owner_tenant_id", "?")[:12]
+            perms = ", ".join(e.get("permissions", []))
+            _ok(f"  {env_name}")
+            if env_title:
+                _ok(f"    {env_title}")
+            _ok(f"    shared with: {grantee}  |  owner: {owner}  |  permissions: {perms}")
+            _ok(f"    id: {e.get('entitlement_id', '?')}")
+            _ok("")
     except EpsilabError as e:
         _err(_friendly_error(e))
     finally:
@@ -3746,13 +3838,22 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_p.add_argument("--json", action="store_true", help="Output as JSON")
     deploy_p.set_defaults(func=cmd_env_deploy)
 
-    # env grant
-    grant_p = env_sub.add_parser("grant", help="Grant access to a buyer")
+    # env grant (share access)
+    grant_p = env_sub.add_parser("grant", help="Share access to an environment")
     grant_p.add_argument("listing_id", help="Listing ID")
-    grant_p.add_argument("tenant_id", help="Buyer's tenant ID")
+    grant_p.add_argument("tenant_id", help="Organization's tenant ID")
     grant_p.add_argument("--license", default="apache-2.0", help="License ID")
     grant_p.add_argument("--expires-at", help="Expiry date (ISO-8601)")
     grant_p.set_defaults(func=cmd_env_grant)
+
+    # env revoke (revoke shared access)
+    revoke_p = env_sub.add_parser("revoke", help="Revoke shared access")
+    revoke_p.add_argument("entitlement_id", help="Entitlement ID to revoke")
+    revoke_p.set_defaults(func=cmd_env_revoke)
+
+    # env shared (list shared environments)
+    shared_p = env_sub.add_parser("shared", help="List shared environments")
+    shared_p.set_defaults(func=cmd_env_shared)
 
     # env status
     status_p = env_sub.add_parser("status", help="Show release status and quality")

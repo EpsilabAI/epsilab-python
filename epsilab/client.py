@@ -3924,6 +3924,7 @@ class EpsilabClient:
         action_schema_digest: str,
         observation_schema_digest: str,
         resource_policy: Optional[Dict[str, Any]] = None,
+        application_tools: Optional[List[Dict[str, str]]] = None,
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentRelease":
         """Register an environment release (creator operation).
@@ -3942,6 +3943,9 @@ class EpsilabClient:
             action_schema_digest: Digest of the action JSON schema.
             observation_schema_digest: Digest of the observation JSON schema.
             resource_policy: Optional resource limits (cpu, memory, gpu).
+            application_tools: Tool release bindings, each a dict with
+                ``tool_release_id``, ``dependency_alias``, and
+                ``configuration_digest``.
             idempotency_key: Unique key for at-most-once delivery.
 
         Returns:
@@ -3960,6 +3964,8 @@ class EpsilabClient:
         }
         if resource_policy:
             body["resource_policy"] = resource_policy
+        if application_tools:
+            body["application_tools"] = application_tools
         data = self._request(
             "POST", "/v1/environment-releases", json_body=body,
             extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
