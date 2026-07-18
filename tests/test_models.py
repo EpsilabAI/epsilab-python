@@ -598,6 +598,13 @@ class TestEnvironmentListing:
                 "release_version": "1.2.0",
                 "qualification_state": "qualified",
                 "deployment_id": "dep-1",
+                "tasks": [
+                    {
+                        "task_id": "code-env-train-001",
+                        "name": "Implement the parser",
+                        "split": "train",
+                    }
+                ],
             }
         )
         assert listing.namespace == "community"
@@ -605,6 +612,7 @@ class TestEnvironmentListing:
         assert listing.is_owner is False
         assert listing.release_id == "rel-1"
         assert listing.deployment_id == "dep-1"
+        assert listing.tasks[0]["task_id"] == "code-env-train-001"
 
 
 class TestApplicationTools:

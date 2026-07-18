@@ -138,6 +138,34 @@ class TestParser:
             explicit_task_id=None,
         ) == "form-contact-001"
 
+    def test_environment_task_discovery_prefers_published_train_split(self):
+        class Client:
+            def iter_tasks(self, **_kwargs):
+                raise AssertionError("generic task discovery should not be needed")
+
+        assert _resolve_environment_task(
+            Client(),
+            slug="workflow",
+            explicit_task_id=None,
+            published_tasks=[
+                {"task_id": "workflow-development-001", "split": "development"},
+                {"task_id": "workflow-train-002", "split": "train"},
+                {"task_id": "workflow-train-001", "split": "train"},
+            ],
+        ) == "workflow-train-001"
+
+    def test_environment_task_discovery_never_invents_task_ids(self):
+        class Client:
+            def iter_tasks(self, **_kwargs):
+                return iter([])
+
+        with pytest.raises(ValueError, match="Pass --task"):
+            _resolve_environment_task(
+                Client(),
+                slug="workflow",
+                explicit_task_id=None,
+            )
+
     def test_env_list_command(self):
         args = build_parser().parse_args(["env", "list", "--limit", "10"])
         assert args.command == "env"
@@ -1340,6 +1368,76 @@ class TestApplicationToolBindings:
 
 
 class TestRunEnvironmentCommand:
+    def test_one_step_flow_uses_listing_task_discovery(self):
+        requested_paths = []
+
+        def handler(req):
+            requested_paths.append(req.url.path)
+            if req.method == "GET" and req.url.path == "/v1/environment-listings":
+                return _json_response(
+                    [
+                        {
+                            "listing_id": "lst-1",
+                            "namespace_id": "ns-1",
+                            "namespace": "epsilab",
+                            "slug": "bug-hunter",
+                            "title": "Bug Hunter",
+                            "deployment_id": "dep-1",
+                        }
+                    ]
+                )
+            if req.method == "GET" and req.url.path == "/v1/environment-listings/lst-1":
+                return _json_response(
+                    {
+                        "listing_id": "lst-1",
+                        "namespace_id": "ns-1",
+                        "namespace": "epsilab",
+                        "slug": "bug-hunter",
+                        "title": "Bug Hunter",
+                        "deployment_id": "dep-1",
+                        "tasks": [
+                            {
+                                "task_id": "bug-hunter-train-001",
+                                "name": "Fix the average",
+                                "domain": "coding",
+                                "capability": "debugging",
+                                "difficulty": "easy",
+                                "verification": "hidden_tests",
+                                "split": "train",
+                            }
+                        ],
+                    }
+                )
+            if req.method == "POST" and req.url.path.endswith("/sessions"):
+                assert json.loads(req.content)["task_id"] == "bug-hunter-train-001"
+                return _json_response(
+                    {
+                        "session_id": "sess-discovery",
+                        "task_id": "bug-hunter-train-001",
+                        "status": "active",
+                        "session_token": "session-secret",
+                        "observation": "Find and fix the bug.",
+                    },
+                    status=202,
+                )
+            if req.method == "POST" and req.url.path.endswith("/step"):
+                return _json_response(
+                    {
+                        "observation": "Submission received.",
+                        "reward": 1.0,
+                        "terminated": True,
+                        "truncated": False,
+                        "info": {"passed": True},
+                    }
+                )
+            raise AssertionError(f"unexpected request: {req.method} {req.url.path}")
+
+        client = _mock_client(handler)
+        with patch("epsilab.cli._get_client", return_value=client):
+            main(["run", "epsilab/bug-hunter", "--action", "fixed code"])
+
+        assert "/v1/tasks" not in requested_paths
+
     def test_one_step_flow_resolves_listing_task_and_uses_session_token(self, capsys):
         captured = {}
 

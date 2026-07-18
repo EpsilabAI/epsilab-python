@@ -2695,10 +2695,24 @@ def _resolve_environment_task(
     *,
     slug: str,
     explicit_task_id: str | None,
+    published_tasks: list[dict[str, Any]] | None = None,
 ) -> str:
     """Resolve a task for a listing without inventing arbitrary UUIDs."""
     if explicit_task_id:
         return explicit_task_id
+
+    published_candidates = [
+        (str(task.get("split") or ""), task_id)
+        for task in (published_tasks or [])
+        if isinstance(task, dict)
+        and isinstance((task_id := task.get("task_id")), str)
+        and task_id
+    ]
+    if published_candidates:
+        return sorted(
+            set(published_candidates),
+            key=lambda item: (item[0] != "train", item[1]),
+        )[0][1]
 
     candidates: list[str] = []
     try:
@@ -2716,7 +2730,9 @@ def _resolve_environment_task(
             set(candidates),
             key=lambda task_id: ("-train-" not in task_id, task_id),
         )[0]
-    return f"{slug}-easy-train-001"
+    raise ValueError(
+        f"No published tasks were found for '{slug}'. Pass --task <task-id> explicitly."
+    )
 
 
 def _encode_environment_action(value: str, *, action_type: str) -> str:
@@ -2794,10 +2810,21 @@ def cmd_run_environment(args: argparse.Namespace) -> None:
     interrupted = False
     try:
         listing = _resolve_environment_listing(client, args.target)
+        published_tasks: list[dict[str, Any]] = []
+        if args.task is None:
+            try:
+                published_tasks = client.get_environment_listing(listing.listing_id).tasks
+            except EpsilabError:
+                _cli_logger.debug(
+                    "Published task discovery failed for %s",
+                    listing.listing_id,
+                    exc_info=True,
+                )
         task_id = _resolve_environment_task(
             client,
             slug=listing.slug,
             explicit_task_id=args.task,
+            published_tasks=published_tasks,
         )
         owner = listing.namespace or args.target.split("/", 1)[0]
         canonical_name = f"{owner}/{listing.slug}"

@@ -573,6 +573,7 @@ class EnvironmentListing:
         visibility: ``private``, ``unlisted``, ``shared``, or ``public``.
         moderation_state: ``draft``, ``approved``, ``suspended``, or ``revoked``.
         recommended_release_id: Currently recommended release, if any.
+        tasks: Published task summaries for the active deployment split.
         created_at: ISO-8601 creation timestamp.
         updated_at: ISO-8601 last-update timestamp.
     """
@@ -612,6 +613,7 @@ class EnvironmentListing:
     unique_users: int = 0
     review_count: int = 0
     avg_rating: Optional[float] = None
+    tasks: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -657,6 +659,7 @@ class EnvironmentListing:
             unique_users=int(data.get("unique_users", 0)),
             review_count=int(data.get("review_count", 0)),
             avg_rating=data.get("avg_rating"),
+            tasks=list(data.get("tasks") or []),
         )
 
 
