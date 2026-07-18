@@ -3571,12 +3571,12 @@ def build_parser() -> argparse.ArgumentParser:
             "config to .epsilab/project.json. Subsequent runs reuse it.\n\n"
             "  epsilab deploy              # deploy current directory\n"
             "  epsilab deploy ./my-env     # deploy a specific directory\n"
-            "  epsilab deploy              # deploy and make live\n"
+            "  epsilab deploy --no-host    # register without hosting\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     deploy_p.add_argument("directory", nargs="?", default=".", help="Environment directory (default: .)")
-    deploy_p.add_argument("--version", help="Release version (default: 0.1.0)")
+    deploy_p.add_argument("--version", help="Release version (default: 1.0.0)")
     deploy_p.add_argument("--namespace-id", help="Namespace ID (skips namespace selection)")
     deploy_p.add_argument(
         "--prod",

@@ -77,6 +77,15 @@ class TestParser:
         assert args.command == "init"
         assert args.slug == "my-environment"
 
+    def test_deploy_help_matches_current_defaults(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            build_parser().parse_args(["deploy", "--help"])
+
+        assert exc_info.value.code == 0
+        output = capsys.readouterr().out
+        assert "Release version (default: 1.0.0)" in output
+        assert "epsilab deploy --no-host" in output
+
     def test_public_run_syntax_is_normalized_without_affecting_run_subcommands(self):
         assert _normalize_cli_argv(["run", "epsilab/bug-hunter", "--action", "x"]) == [
             "run",
