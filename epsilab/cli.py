@@ -1617,13 +1617,18 @@ def cmd_env_shared(args: argparse.Namespace) -> None:
         for e in active:
             env_name = e.get("environment_namespace", "?") + "/" + e.get("environment_slug", "?")
             env_title = e.get("environment_title", "")
-            grantee = e.get("grantee_name") or e.get("grantee_tenant_id", "?")[:12]
-            owner = e.get("owner_name") or e.get("owner_tenant_id", "?")[:12]
+            access_role = e.get("access_role")
+            if access_role == "owner":
+                counterpart_label = "shared with"
+                counterpart = e.get("grantee_name") or str(e.get("grantee_tenant_id", "?"))[:12]
+            else:
+                counterpart_label = "shared by"
+                counterpart = e.get("owner_name") or str(e.get("owner_tenant_id", "?"))[:12]
             perms = ", ".join(e.get("permissions", []))
             _ok(f"  {env_name}")
             if env_title:
                 _ok(f"    {env_title}")
-            _ok(f"    shared with: {grantee}  |  owner: {owner}  |  permissions: {perms}")
+            _ok(f"    {counterpart_label}: {counterpart}  |  permissions: {perms}")
             _ok(f"    id: {e.get('entitlement_id', '?')}")
             _ok("")
     except EpsilabError as e:

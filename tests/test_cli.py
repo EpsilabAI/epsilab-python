@@ -749,6 +749,44 @@ class TestEnvGrant:
         assert captured["body"]["license_id"] == "mit"
         assert captured["body"]["expires_at"] == "2027-01-01T00:00:00Z"
 
+    def test_shared_command_labels_owned_and_received_access(self, capsys):
+        def handler(req):
+            assert req.method == "GET"
+            return _json_response([
+                {
+                    "entitlement_id": "owned-1",
+                    "environment_namespace": "my-team",
+                    "environment_slug": "owned-env",
+                    "environment_title": "Owned Environment",
+                    "owner_tenant_id": "tenant-me",
+                    "grantee_tenant_id": "tenant-partner",
+                    "grantee_name": "Partner Org",
+                    "permissions": ["discover", "execute"],
+                    "status": "active",
+                    "access_role": "owner",
+                },
+                {
+                    "entitlement_id": "received-1",
+                    "environment_namespace": "research",
+                    "environment_slug": "received-env",
+                    "environment_title": "Received Environment",
+                    "owner_tenant_id": "tenant-lab",
+                    "grantee_tenant_id": "tenant-me",
+                    "owner_name": "Research Lab",
+                    "permissions": ["execute"],
+                    "status": "active",
+                    "access_role": "recipient",
+                },
+            ])
+
+        client = _mock_client(handler)
+        with patch("epsilab.cli._get_client", return_value=client):
+            main(["env", "shared"])
+
+        output = capsys.readouterr().out
+        assert "shared with: Partner Org" in output
+        assert "shared by: Research Lab" in output
+
 
 class TestEnvQualify:
     def test_basic(self, capsys):
