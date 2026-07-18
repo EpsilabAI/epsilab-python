@@ -33,6 +33,7 @@ from _environment_utils import (
     resolve_environments,
     submission,
     task_ids_for_environment,
+    terminal_reward,
 )
 
 # ── Scoring ──────────────────────────────────────────────────────
@@ -47,7 +48,8 @@ def score_completions(
 ) -> list[float]:
     """Score completions by running them through an Epsilab environment."""
     rewards = []
-    for prompt, completion in zip(prompts, completions):
+    pairs = zip(prompts, completions, strict=True)
+    for index, (_prompt, completion) in enumerate(pairs, start=1):
         try:
             session = client.create_environment_session(deployment_id, task_id=task_id)
             session = client.wait_for_session(session)
@@ -56,9 +58,13 @@ def score_completions(
                 submission(completion),
                 session_token=session.session_token,
             )
-            rewards.append(result.reward or 0.0)
-        except Exception:
-            rewards.append(0.0)
+            rewards.append(
+                terminal_reward(result, context=f"Completion {index}")
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Environment scoring failed for completion {index}; training was stopped"
+            ) from exc
     return rewards
 
 

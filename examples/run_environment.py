@@ -34,6 +34,7 @@ from _environment_utils import (
     resolve_environments,
     submission,
     task_ids_for_environment,
+    terminal_reward,
 )
 
 # ── Data collection ──────────────────────────────────────────────
@@ -69,14 +70,15 @@ def collect_training_data(
                     submission(response),
                     session_token=session.session_token,
                 )
+                reward = terminal_reward(result, context=f"Task {task_id}")
                 records.append({
                     "prompt": prompt,
                     "completion": response,
-                    "reward": result.reward or 0.0,
+                    "reward": reward,
                     "task_id": task_id,
                     "env": slug,
                 })
-                print(f"    {task_id:50s}  reward={result.reward or 0:.3f}")
+                print(f"    {task_id:50s}  reward={reward:.3f}")
             except Exception as e:
                 print(f"    {task_id:50s}  skipped: {e}")
 

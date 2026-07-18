@@ -33,6 +33,7 @@ from _environment_utils import (
     resolve_environments,
     submission,
     task_ids_for_environment,
+    terminal_reward,
 )
 
 
@@ -61,13 +62,14 @@ def evaluate_sequential(
                     submission(action),
                     session_token=session.session_token,
                 )
+                reward = terminal_reward(result, context=f"Task {task_id}")
                 results.append({
                     "env": slug,
                     "task_id": task_id,
-                    "reward": result.reward or 0.0,
+                    "reward": reward,
                     "terminated": result.terminated,
                 })
-                print(f"    {task_id:45s}  reward={result.reward or 0:.3f}")
+                print(f"    {task_id:45s}  reward={reward:.3f}")
             except Exception as e:
                 print(f"    {task_id:45s}  skipped: {e}")
 

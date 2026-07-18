@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from epsilab import Epsilab
 
 
@@ -42,7 +44,10 @@ def task_ids_for_environment(
         str(task["task_id"])
         for task in client.iter_tasks(source="custom", page_size=100)
         if isinstance(task.get("task_id"), str)
-        and str(task["task_id"]).startswith(f"{slug}-")
+        and (
+            str(task["task_id"]).startswith(f"{slug}-")
+            or task.get("capability") == slug
+        )
     }
     ordered = sorted(candidates, key=lambda task_id: ("-train-" not in task_id, task_id))
     if ordered:
@@ -53,3 +58,15 @@ def task_ids_for_environment(
 def submission(content: str) -> dict[str, str]:
     """Build the structured text action used by first-party catalog environments."""
     return {"content": content, "action_type": "submit"}
+
+
+def terminal_reward(result: object, *, context: str) -> float:
+    """Return a finite terminal reward without fabricating failed outcomes."""
+    reward = getattr(result, "reward", None)
+    if not getattr(result, "done", False) or reward is None:
+        raise RuntimeError(f"{context} did not return a terminal reward")
+
+    value = float(reward)
+    if not math.isfinite(value):
+        raise RuntimeError(f"{context} returned a non-finite reward")
+    return value
