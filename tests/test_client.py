@@ -2480,6 +2480,194 @@ class TestRunEnvironmentEpisode:
         assert result.reward == 1.0
         assert call_count == 3
 
+    def test_waits_for_provisioning_before_first_policy_action(self):
+        session_reads = 0
+        observations = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal session_reads
+            path = req.url.path
+            if path == "/v1/environment-deployments/dep-1/sessions" and req.method == "POST":
+                return _json_response(
+                    {
+                        "session_id": "sess-wait",
+                        "task_id": "task-1",
+                        "status": "provisioning",
+                        "session_token": "tok-wait",
+                    },
+                    status=202,
+                )
+            if path == "/v1/environment-sessions/sess-wait" and req.method == "GET":
+                session_reads += 1
+                if session_reads == 1:
+                    return _json_response(
+                        {
+                            "session_id": "sess-wait",
+                            "task_id": "task-1",
+                            "status": "active",
+                            "observation": "ready observation",
+                        }
+                    )
+                return _json_response(
+                    {
+                        "session_id": "sess-wait",
+                        "task_id": "task-1",
+                        "status": "completed",
+                        "total_reward": 1.0,
+                    }
+                )
+            if path == "/v1/environment-sessions/sess-wait/step":
+                assert req.headers["X-RL-Session-Token"] == "tok-wait"
+                return _json_response(
+                    {
+                        "observation": "done",
+                        "reward": 1.0,
+                        "terminated": True,
+                        "truncated": False,
+                    }
+                )
+            return _json_response({}, 404)
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.run_environment_episode(
+            "dep-1",
+            task_id="task-1",
+            policy_fn=lambda observation, _info: observations.append(observation) or "answer",
+        )
+
+        assert observations == ["ready observation"]
+        assert result.status == "completed"
+
+    def test_cancels_session_at_policy_step_limit(self):
+        cancelled = False
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal cancelled
+            path = req.url.path
+            if path == "/v1/environment-deployments/dep-1/sessions":
+                return _json_response(
+                    {
+                        "session_id": "sess-limit",
+                        "task_id": "task-1",
+                        "status": "active",
+                        "session_token": "tok-limit",
+                        "observation": "continue",
+                    },
+                    status=202,
+                )
+            if path == "/v1/environment-sessions/sess-limit/step":
+                return _json_response(
+                    {
+                        "observation": "still running",
+                        "reward": None,
+                        "terminated": False,
+                        "truncated": False,
+                    }
+                )
+            if path == "/v1/environment-sessions/sess-limit/cancel":
+                cancelled = True
+                return _json_response({"session_id": "sess-limit", "status": "cancelled"})
+            if path == "/v1/environment-sessions/sess-limit":
+                return _json_response(
+                    {
+                        "session_id": "sess-limit",
+                        "task_id": "task-1",
+                        "status": "cancelled" if cancelled else "active",
+                    }
+                )
+            return _json_response({}, 404)
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.run_environment_episode(
+            "dep-1",
+            task_id="task-1",
+            policy_fn=lambda _observation, _info: "continue",
+            max_steps=1,
+        )
+
+        assert cancelled is True
+        assert result.status == "cancelled"
+
+
+class TestRunBatch:
+    def test_drives_provisioned_sessions_and_returns_final_records(self):
+        stepped = False
+        policy_contexts = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal stepped
+            path = req.url.path
+            if path == "/v1/environment-batches" and req.method == "POST":
+                return _json_response({"batch_id": "bat-run", "status": "queued"}, status=202)
+            if path == "/v1/environment-batches/bat-run/sessions":
+                return _json_response(
+                    [
+                        {
+                            "session_id": "sess-batch",
+                            "task_id": "task-batch",
+                            "seed": 7,
+                            "session_status": "completed" if stepped else "active",
+                            "total_reward": 1.0 if stepped else None,
+                        }
+                    ]
+                )
+            if path == "/v1/environment-batches/bat-run":
+                return _json_response(
+                    {
+                        "batch_id": "bat-run",
+                        "status": "completed" if stepped else "running",
+                        "sessions_requested": 1,
+                        "sessions_completed": 1 if stepped else 0,
+                        "sessions_failed": 0,
+                    }
+                )
+            if path == "/v1/environment-sessions/sess-batch/token":
+                return _json_response(
+                    {
+                        "session_id": "sess-batch",
+                        "session_token": "tok-batch",
+                        "session_token_expires_at": "2026-07-18T12:00:00Z",
+                    }
+                )
+            if path == "/v1/environment-sessions/sess-batch/step":
+                assert req.headers["X-RL-Session-Token"] == "tok-batch"
+                stepped = True
+                return _json_response(
+                    {
+                        "observation": "complete",
+                        "reward": 1.0,
+                        "terminated": True,
+                        "truncated": False,
+                    }
+                )
+            if path == "/v1/environment-sessions/sess-batch":
+                return _json_response(
+                    {
+                        "session_id": "sess-batch",
+                        "task_id": "task-batch",
+                        "seed": 7,
+                        "status": "completed" if stepped else "active",
+                        "observation": "batch observation",
+                        "total_reward": 1.0 if stepped else None,
+                    }
+                )
+            return _json_response({}, 404)
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.run_batch(
+            deployment_id="dep-1",
+            name="SDK batch",
+            task_seed_pairs=[{"task_id": "task-batch", "seed": 7}],
+            policy_fn=lambda observation, info: policy_contexts.append((observation, info)) or "answer",
+            poll_interval=0.05,
+        )
+
+        assert result["status"] == "completed"
+        assert result["sessions"][0]["total_reward"] == 1.0
+        assert policy_contexts[0][0] == "batch observation"
+        assert policy_contexts[0][1]["task_id"] == "task-batch"
+        assert policy_contexts[0][1]["seed"] == 7
+
 
 class TestListEntitlements:
     def test_basic(self):

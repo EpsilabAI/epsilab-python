@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import time
 from pathlib import Path
 
 from epsilab import Epsilab
@@ -79,10 +78,11 @@ def evaluate_sequential(
 def evaluate_batch(
     client: Epsilab,
     environments: list[dict],
+    model_fn,
     tasks_per_env: int = 5,
     seed: int = 42,
 ) -> list[dict]:
-    """Run server-side batch evaluation (parallel)."""
+    """Provision sessions as a batch and drive them with the local model policy."""
     results = []
     for env in environments:
         slug = env["slug"]
@@ -94,30 +94,24 @@ def evaluate_batch(
         print(f"\n  [{slug}] submitting batch of {len(task_seed_pairs)} tasks ...")
 
         try:
-            batch = client.create_batch(
+            batch = client.run_batch(
                 deployment_id=dep_id,
                 name=f"eval-{slug}",
                 task_seed_pairs=task_seed_pairs,
+                policy_fn=lambda observation, _info: submission(model_fn(observation)),
             )
             batch_id = batch.get("batch_id")
-            print(f"    Batch {batch_id}")
-
-            while True:
-                status = client.get_batch(batch_id)
-                state = status.get("status", "unknown")
-                print(f"    Status: {state}")
-                if state in ("completed", "failed", "cancelled"):
-                    break
-                time.sleep(5)
+            state = batch.get("status", "unknown")
+            print(f"    Batch {batch_id}: {state}")
 
             if state == "completed":
-                sessions = client.get_batch_sessions(batch_id)
+                sessions = batch.get("sessions", [])
                 for s in sessions:
                     results.append({
                         "env": slug,
                         "task_id": s.get("task_id", "?"),
                         "reward": s.get("total_reward", 0.0),
-                        "terminated": s.get("status") == "completed",
+                        "terminated": s.get("session_status") == "completed",
                     })
             else:
                 print(f"    Batch {state}")
@@ -184,7 +178,7 @@ def main():
         return f"Based on the observation, here is my solution: {observation[:100]}"
 
     if args.mode == "batch":
-        results = evaluate_batch(client, environments, args.tasks_per_env, args.seed)
+        results = evaluate_batch(client, environments, model_fn, args.tasks_per_env, args.seed)
     else:
         results = evaluate_sequential(client, environments, model_fn, args.tasks_per_env, args.seed)
 

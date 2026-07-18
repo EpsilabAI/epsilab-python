@@ -112,6 +112,29 @@ The example scripts support any training provider:
 | `tinker` | `pip install epsilab[tinker]` | Custom training loops on remote GPUs |
 | `local` | `pip install epsilab[training]` | TRL on local GPU (SFT/DPO/KTO/GRPO) |
 
+### Batch evaluation with your policy
+
+Batch creation provisions reproducible sessions; your code still supplies the
+agent actions. `run_batch` handles both parts so sessions cannot be left idle:
+
+```python
+batch = client.run_batch(
+    deployment_id="deployment-id",
+    name="regression sweep",
+    task_seed_pairs=[
+        {"task_id": "task-001", "seed": 42},
+        {"task_id": "task-002", "seed": 42},
+    ],
+    policy_fn=lambda observation, info: my_agent(observation),
+)
+
+for session in batch["sessions"]:
+    print(session["task_id"], session["total_reward"])
+```
+
+For a batch created in the dashboard or CLI, call
+`client.drive_batch(batch_id, policy_fn=my_policy)`.
+
 ## Creating an Environment
 
 An RL environment is a containerized task server. At minimum it needs:
@@ -232,7 +255,7 @@ The SDK retries automatically on rate limits (429) and transient server errors (
 | [`examples/example.py`](examples/example.py) | **Start here** — discover envs, run one session, see rewards |
 | [`examples/run_environment.py`](examples/run_environment.py) | Collect data across multiple envs, train with SFT/DPO/KTO |
 | [`examples/grpo_training.py`](examples/grpo_training.py) | Online GRPO with live environment rewards |
-| [`examples/batch_evaluation.py`](examples/batch_evaluation.py) | Benchmark a model across envs with server-side batches |
+| [`examples/batch_evaluation.py`](examples/batch_evaluation.py) | Benchmark a policy across provisioned environment batches |
 | [`examples/marketplace_example.py`](examples/marketplace_example.py) | Consumer and publisher hub workflows |
 
 All examples use `argparse` — run with `--help` for options. Key flags:

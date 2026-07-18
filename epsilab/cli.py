@@ -3071,6 +3071,7 @@ def cmd_env_batch_create(args: argparse.Namespace) -> None:
         )
         _ok(f"Batch created: {result.get('batch_id', '?')}")
         _ok(f"  tasks: {len(pairs)}")
+        _ok(f"  run with your policy: client.drive_batch({result.get('batch_id', '?')!r}, policy_fn=policy)")
         if args.json:
             _json_out(result)
     except EpsilabError as e:
@@ -3092,7 +3093,7 @@ def cmd_env_batch_list(args: argparse.Namespace) -> None:
             return
         rows = [{"id": b.get("batch_id", "?"), "name": b.get("name", "?"),
                   "status": b.get("status", "?"),
-                  "sessions": b.get("total_sessions", "?")}
+                  "sessions": f"{b.get('sessions_completed', 0)}/{b.get('sessions_requested', 0)}"}
                 for b in batches]
         _table(rows, ["id", "name", "status", "sessions"])
         if args.json:
@@ -3110,7 +3111,11 @@ def cmd_env_batch_show(args: argparse.Namespace) -> None:
         _ok(f"Batch: {batch.get('batch_id', '?')}")
         _ok(f"  name: {batch.get('name', '?')}")
         _ok(f"  status: {batch.get('status', '?')}")
-        _ok(f"  sessions: {batch.get('total_sessions', '?')}")
+        _ok(
+            "  sessions: "
+            f"{batch.get('sessions_completed', 0)}/{batch.get('sessions_requested', 0)} completed, "
+            f"{batch.get('sessions_failed', 0)} failed"
+        )
 
         if args.sessions:
             sessions = client.get_batch_sessions(args.batch_id)

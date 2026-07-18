@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 from urllib.parse import quote
 
 import httpx
@@ -2763,7 +2763,7 @@ class EpsilabClient:
         deployment_id: str,
         *,
         task_id: str,
-        policy_fn: Any,
+        policy_fn: Callable[[str, Dict[str, Any]], Union[str, Dict[str, Any]]],
         seed: Optional[int] = None,
         max_steps: int = 100,
         idempotency_key: Optional[str] = None,
@@ -2792,23 +2792,89 @@ class EpsilabClient:
             seed=seed,
             idempotency_key=idempotency_key,
         )
-        token = session.session_token
-        obs = session.observation or ""
-        info: Dict[str, Any] = {}
+        return self._run_environment_session(
+            session,
+            policy_fn=policy_fn,
+            max_steps=max_steps,
+        )
 
-        for _ in range(max_steps):
-            action = policy_fn(obs, info)
-            result = self.environment_step(
-                session.session_id,
-                action,
-                session_token=token,
+    def _run_environment_session(
+        self,
+        session: "EnvironmentSession",
+        *,
+        policy_fn: Callable[[str, Dict[str, Any]], Union[str, Dict[str, Any]]],
+        max_steps: int,
+    ) -> "EnvironmentSession":
+        """Drive one created session and clean it up if the policy cannot finish."""
+        if max_steps < 1:
+            raise ValueError("max_steps must be at least 1")
+        session = self.wait_for_session(session)
+        if session.is_terminal:
+            return session
+        if not session.is_active:
+            raise RuntimeError(
+                f"Session {session.session_id} cannot be stepped while status is {session.status!r}"
             )
-            obs = result.observation
-            info = result.info
-            if result.done:
-                break
 
-        return self.get_environment_session(session.session_id)
+        token = session.session_token
+        try:
+            if not token:
+                refreshed = self.refresh_session_token(session.session_id)
+                token = refreshed.get("session_token")
+            if not isinstance(token, str) or not token:
+                raise RuntimeError(f"Session {session.session_id} did not return a step credential")
+
+            observation = session.observation or ""
+            step_info: Dict[str, Any] = {}
+            for step_index in range(max_steps):
+                policy_info: Dict[str, Any] = {
+                    **step_info,
+                    "session_id": session.session_id,
+                    "task_id": session.task_id,
+                    "seed": session.seed,
+                    "step_index": step_index,
+                }
+                action = policy_fn(observation, policy_info)
+                step_key = self._auto_idem_key()
+                try:
+                    result = self.environment_step(
+                        session.session_id,
+                        action,
+                        session_token=token,
+                        idempotency_key=step_key,
+                    )
+                except AuthError:
+                    refreshed = self.refresh_session_token(session.session_id)
+                    token = refreshed.get("session_token")
+                    if not isinstance(token, str) or not token:
+                        raise RuntimeError(
+                            f"Session {session.session_id} could not refresh its step credential"
+                        )
+                    result = self.environment_step(
+                        session.session_id,
+                        action,
+                        session_token=token,
+                        idempotency_key=step_key,
+                    )
+                observation = result.observation
+                step_info = result.info
+                if result.done:
+                    return self.get_environment_session(session.session_id)
+
+            self.cancel_environment_session(session.session_id)
+            return self.get_environment_session(session.session_id)
+        except Exception:
+            try:
+                current = self.get_environment_session(session.session_id)
+                if not current.is_terminal:
+                    self.cancel_environment_session(session.session_id)
+            except Exception:
+                logger.warning(
+                    "Could not clean up environment session %s after policy failure",
+                    session.session_id,
+                    exc_info=True,
+                )
+            raise
 
     # ── Entitlements ─────────────────────────────────────────────────
 
@@ -2995,7 +3061,11 @@ class EpsilabClient:
         max_credits: Optional[int] = None,
         idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Start a batch evaluation across multiple tasks.
+        """Provision a batch of sessions across multiple tasks.
+
+        Session provisioning runs in the service, while your policy supplies
+        actions. Use :meth:`run_batch` for the complete managed loop or use
+        :meth:`get_batch_sessions` and the session APIs directly.
 
         Args:
             deployment_id: Deployment to run on.
@@ -3074,6 +3144,123 @@ class EpsilabClient:
             "POST",
             f"/v1/environment-batches/{self._path_segment(batch_id)}/cancel",
         )
+
+    def run_batch(
+        self,
+        *,
+        deployment_id: str,
+        name: str,
+        task_seed_pairs: List[Dict[str, Any]],
+        policy_fn: Callable[[str, Dict[str, Any]], Union[str, Dict[str, Any]]],
+        max_steps_per_session: int = 100,
+        poll_interval: float = 1.0,
+        timeout: float = 1800.0,
+        max_credits: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run a complete batch with a customer-supplied policy.
+
+        The callback receives ``(observation, info)`` for every step. ``info``
+        includes ``session_id``, ``task_id``, ``seed``, and ``step_index`` in
+        addition to environment-provided fields. The method handles session
+        provisioning, credential refresh, polling, and cleanup.
+
+        Returns the final batch record with a ``sessions`` list attached.
+        """
+        self._validate_batch_execution_options(
+            max_steps_per_session=max_steps_per_session,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )
+
+        batch = self.create_batch(
+            deployment_id=deployment_id,
+            name=name,
+            task_seed_pairs=task_seed_pairs,
+            max_credits=max_credits,
+            idempotency_key=idempotency_key,
+        )
+        return self.drive_batch(
+            str(batch["batch_id"]),
+            policy_fn=policy_fn,
+            max_steps_per_session=max_steps_per_session,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )
+
+    def drive_batch(
+        self,
+        batch_id: str,
+        *,
+        policy_fn: Callable[[str, Dict[str, Any]], Union[str, Dict[str, Any]]],
+        max_steps_per_session: int = 100,
+        poll_interval: float = 1.0,
+        timeout: float = 1800.0,
+    ) -> Dict[str, Any]:
+        """Drive the sessions in an existing batch with a policy callback.
+
+        This is useful after creating a batch through the CLI or dashboard.
+        Returns the final batch record with a ``sessions`` list attached.
+        """
+        self._validate_batch_execution_options(
+            max_steps_per_session=max_steps_per_session,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )
+        driven_sessions: set[str] = set()
+        deadline = time.monotonic() + timeout
+
+        try:
+            while True:
+                sessions = self.get_batch_sessions(batch_id)
+                for item in sessions:
+                    session_id = item.get("session_id")
+                    session_status = item.get("session_status") or item.get("status")
+                    if not isinstance(session_id, str) or not session_id:
+                        continue
+                    if session_status in {"completed", "truncated", "failed", "cancelled", "closed"}:
+                        driven_sessions.add(session_id)
+                        continue
+                    if session_status != "active" or session_id in driven_sessions:
+                        continue
+                    session = self.get_environment_session(session_id)
+                    self._run_environment_session(
+                        session,
+                        policy_fn=policy_fn,
+                        max_steps=max_steps_per_session,
+                    )
+                    driven_sessions.add(session_id)
+
+                batch = self.get_batch(batch_id)
+                if batch.get("status") in {"completed", "failed", "cancelled"}:
+                    final = dict(batch)
+                    final["sessions"] = self.get_batch_sessions(batch_id)
+                    return final
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Batch {batch_id} did not complete within {timeout}s")
+                time.sleep(poll_interval)
+        except Exception:
+            try:
+                current = self.get_batch(batch_id)
+                if current.get("status") not in {"completed", "failed", "cancelled"}:
+                    self.cancel_batch(batch_id)
+            except Exception:
+                logger.warning("Could not clean up batch %s after execution failure", batch_id, exc_info=True)
+            raise
+
+    @staticmethod
+    def _validate_batch_execution_options(
+        *,
+        max_steps_per_session: int,
+        poll_interval: float,
+        timeout: float,
+    ) -> None:
+        if max_steps_per_session < 1:
+            raise ValueError("max_steps_per_session must be at least 1")
+        if poll_interval < 0.05:
+            raise ValueError("poll_interval must be at least 0.05 seconds")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
 
     def get_batch_comparison(self, batch_id: str) -> Dict[str, Any]:
         """Get the comparison report for a completed batch.
