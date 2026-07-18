@@ -51,4 +51,4 @@ __all__ = [
     "ApplicationToolRelease",
 ]
 
-__version__ = "0.17.6"
+__version__ = "0.17.7"

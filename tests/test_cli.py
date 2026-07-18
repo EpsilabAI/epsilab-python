@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -15,6 +16,8 @@ import pytest
 
 from epsilab.cli import (
     _active_profile,
+    _deploy_environment,
+    _docker_build_and_upload,
     _encode_environment_action,
     _get_client,
     _interactive_action,
@@ -1398,6 +1401,98 @@ class TestRunEnvironmentCommand:
 
 
 class TestRootDeployCommand:
+    def test_docker_build_uses_named_context(self, tmp_path):
+        directory = tmp_path / "environment"
+        appsuite = tmp_path / "AppSuite"
+        directory.mkdir()
+        appsuite.mkdir()
+        (directory / "Dockerfile").write_text("FROM scratch\n")
+
+        class Client:
+            def upload_image(self, _path, *, tag):
+                return {"image_ref": f"registry.example/{tag}"}
+
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch("subprocess.run", return_value=completed) as run:
+            _docker_build_and_upload(
+                Client(),
+                directory,
+                "demo:1.0.0",
+                named_contexts={"appsuite": appsuite},
+            )
+
+        build_command = run.call_args_list[0].args[0]
+        context_index = build_command.index("--build-context")
+        assert build_command[context_index + 1] == f"appsuite={appsuite}"
+
+    def test_composed_deploy_passes_current_appsuite_checkout(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        catalog = tmp_path / "env-catalog"
+        directory = catalog / "composed" / "demo"
+        appsuite = tmp_path / "AppSuite"
+        directory.mkdir(parents=True)
+        (catalog / "_shared").mkdir()
+        (appsuite / "src" / "epsilab_apps").mkdir(parents=True)
+        (appsuite / "pyproject.toml").write_text("[project]\nname='epsilab-apps'\n")
+        (appsuite / "src" / "epsilab_apps" / "__init__.py").write_text("")
+        (directory / "Dockerfile").write_text(
+            "ARG ENV_PATH\nCOPY --from=appsuite src /tmp/AppSuite/src\n"
+        )
+        captured = {}
+
+        def upload(*_args, **kwargs):
+            captured.update(kwargs)
+            return {
+                "image_ref": "registry.example/demo@sha256:" + "a" * 64,
+                "content_digest": "sha256:" + "a" * 64,
+            }
+
+        class Client:
+            def create_task(self, **_kwargs):
+                raise AssertionError("no tasks expected")
+
+            def create_task_pack_release(self, **_kwargs):
+                return {"release_id": "pack-1"}
+
+            def create_verifier_release(self, **_kwargs):
+                return {"release_id": "ver-1"}
+
+            def create_environment_release(self, **_kwargs):
+                return {"release_id": "rel-1"}
+
+            def create_deployment(self, **_kwargs):
+                return {"deployment_id": "dep-1"}
+
+            def get_environment_listing(self, _listing_id):
+                return SimpleNamespace(namespace="epsilab", deployment_id="dep-1")
+
+        monkeypatch.setattr("epsilab.cli._docker_build_and_upload", upload)
+        monkeypatch.setattr("epsilab.cli._save_project", lambda *_args: None)
+        args = build_parser().parse_args(["deploy", str(directory), "--yes"])
+        project = {
+            "listing_id": "listing-1",
+            "namespace_id": "namespace-1",
+            "slug": "demo",
+            "title": "Demo",
+            "version": "1.0.0",
+        }
+
+        _deploy_environment(
+            args,
+            Client(),
+            directory,
+            {"tasks": []},
+            project,
+            "namespace-1",
+        )
+
+        assert captured["build_context"] == catalog
+        assert captured["build_args"] == {"ENV_PATH": "composed/demo"}
+        assert captured["named_contexts"] == {"appsuite": appsuite}
+
     def test_repairs_empty_project_ids_and_creates_openenv_deployment(
         self,
         tmp_path,

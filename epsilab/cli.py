@@ -551,6 +551,7 @@ def _save_project(directory: Path, project: dict) -> None:
 def _docker_build_and_upload(
     client: EpsilabClient, directory: Path, image_tag: str,
     *, build_context: Path | None = None, build_args: dict | None = None,
+    named_contexts: dict[str, Path] | None = None,
 ) -> dict:
     """Build a Docker image locally and upload via the API.
 
@@ -566,6 +567,10 @@ def _docker_build_and_upload(
     cmd = ["docker", "build", "--platform", "linux/amd64"]
     for k, v in (build_args or {}).items():
         cmd.extend(["--build-arg", f"{k}={v}"])
+    for name, path in sorted((named_contexts or {}).items()):
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name) is None:
+            raise ValueError(f"Invalid Docker build context name: {name!r}")
+        cmd.extend(["--build-context", f"{name}={path}"])
     cmd.extend(["-t", local_tag, "-f", str(directory / "Dockerfile"), str(ctx)])
     _ok("  Building image ...")
     _cli_logger.debug("docker build: %s", " ".join(cmd))
@@ -1010,17 +1015,38 @@ def _deploy_environment(
 
     step("Building and uploading")
     build_args = {}
+    named_contexts: dict[str, Path] = {}
     shared_dir = directory.parent.parent / "_shared" if (directory.parent.parent / "_shared").exists() else None
-    if shared_dir and "ENV_PATH" in (directory / "Dockerfile").read_text():
+    dockerfile = (directory / "Dockerfile").read_text()
+    if shared_dir and "ENV_PATH" in dockerfile:
         rel_env_path = str(directory.relative_to(directory.parent.parent))
         build_args["ENV_PATH"] = rel_env_path
         build_context = directory.parent.parent
     else:
         build_context = None
 
+    if "--from=appsuite" in dockerfile.lower():
+        appsuite_root = Path(
+            os.environ.get(
+                "EPSILAB_APPSUITE_ROOT",
+                str((build_context or directory).parent / "AppSuite"),
+            )
+        ).expanduser().resolve()
+        if not (
+            (appsuite_root / "pyproject.toml").is_file()
+            and (appsuite_root / "src" / "epsilab_apps" / "__init__.py").is_file()
+        ):
+            raise ValueError(
+                "This environment requires an AppSuite checkout. Set "
+                "EPSILAB_APPSUITE_ROOT to its directory."
+            )
+        named_contexts["appsuite"] = appsuite_root
+
     upload = _docker_build_and_upload(
         client, directory, image_tag,
-        build_context=build_context, build_args=build_args,
+        build_context=build_context,
+        build_args=build_args,
+        named_contexts=named_contexts,
     )
     oci_ref = upload["image_ref"]
     if "@sha256:" in oci_ref:
