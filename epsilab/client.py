@@ -3589,6 +3589,7 @@ class EpsilabClient:
         slug: str,
         title: str,
         summary: Optional[str] = None,
+        readme: Optional[str] = None,
         visibility: str = "public",
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentListing":
@@ -3599,6 +3600,7 @@ class EpsilabClient:
             slug: URL-safe listing slug.
             title: Listing title.
             summary: Short description.
+            readme: Long-form description (Markdown, up to 32 000 chars).
             visibility: ``private``, ``unlisted``, ``shared``, or ``public``.
             idempotency_key: Unique key for at-most-once delivery.
 
@@ -3612,6 +3614,8 @@ class EpsilabClient:
         }
         if summary:
             body["summary"] = summary
+        if readme:
+            body["readme"] = readme
         if visibility:
             body["visibility"] = visibility
         data = self._request(
@@ -3628,23 +3632,27 @@ class EpsilabClient:
         title: str,
         category: str,
         summary: str = "",
+        readme: str = "",
         tags: Optional[List[str]] = None,
         visibility: str = "public",
         idempotency_key: Optional[str] = None,
     ) -> "ApplicationTool":
         """Create an Application Tool listing."""
+        body: Dict[str, Any] = {
+            "namespace_id": namespace_id,
+            "slug": slug,
+            "title": title,
+            "summary": summary,
+            "category": category,
+            "tags": tags or [],
+            "visibility": visibility,
+        }
+        if readme:
+            body["readme"] = readme
         data = self._request(
             "POST",
             "/v1/application-tools",
-            json_body={
-                "namespace_id": namespace_id,
-                "slug": slug,
-                "title": title,
-                "summary": summary,
-                "category": category,
-                "tags": tags or [],
-                "visibility": visibility,
-            },
+            json_body=body,
             extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
         )
         return ApplicationTool.from_dict(data)
@@ -3690,6 +3698,7 @@ class EpsilabClient:
         expected_revision: int,
         title: Optional[str] = None,
         summary: Optional[str] = None,
+        readme: Optional[str] = None,
         category: Optional[str] = None,
         tags: Optional[List[str]] = None,
         visibility: Optional[str] = None,
@@ -3700,6 +3709,7 @@ class EpsilabClient:
         for key, value in {
             "title": title,
             "summary": summary,
+            "readme": readme,
             "category": category,
             "tags": tags,
             "visibility": visibility,
@@ -3721,6 +3731,7 @@ class EpsilabClient:
         expected_revision: int,
         title: Optional[str] = None,
         summary: Optional[str] = None,
+        readme: Optional[str] = None,
         visibility: Optional[str] = None,
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentListing":
@@ -3733,6 +3744,7 @@ class EpsilabClient:
             expected_revision: Current revision number (prevents conflicts).
             title: New title.
             summary: New summary.
+            readme: New long-form description (Markdown, up to 32 000 chars).
             visibility: New visibility.
             idempotency_key: Unique key for at-most-once delivery.
 
@@ -3744,6 +3756,8 @@ class EpsilabClient:
             body["title"] = title
         if summary:
             body["summary"] = summary
+        if readme is not None:
+            body["readme"] = readme
         if visibility:
             body["visibility"] = visibility
         data = self._request(

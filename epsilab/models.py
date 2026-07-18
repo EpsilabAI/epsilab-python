@@ -582,6 +582,7 @@ class EnvironmentListing:
     slug: str
     title: str
     summary: str = ""
+    readme: str = ""
     visibility: str = "public"
     moderation_state: str = "approved"
     recommended_release_id: Optional[str] = None
@@ -590,6 +591,8 @@ class EnvironmentListing:
     namespace: Optional[str] = None
     revision: int = 1
     is_owner: bool = False
+    creator_display_name: Optional[str] = None
+    creator_verification_status: Optional[str] = None
     release_id: Optional[str] = None
     release_version: Optional[str] = None
     qualification_state: Optional[str] = None
@@ -624,6 +627,7 @@ class EnvironmentListing:
             slug=data.get("slug", ""),
             title=data.get("title", ""),
             summary=data.get("summary", ""),
+            readme=data.get("readme", ""),
             visibility=data.get("visibility", "public"),
             moderation_state=data.get("moderation_state", "approved"),
             recommended_release_id=_opt_str(data.get("recommended_release_id")),
@@ -632,6 +636,8 @@ class EnvironmentListing:
             namespace=data.get("namespace"),
             revision=int(data.get("listing_revision", data.get("revision", 1))),
             is_owner=bool(data.get("is_owner", False)),
+            creator_display_name=data.get("creator_display_name"),
+            creator_verification_status=data.get("creator_verification_status"),
             release_id=_opt_str(data.get("release_id")),
             release_version=data.get("release_version"),
             qualification_state=data.get("qualification_state"),
@@ -664,6 +670,7 @@ class ApplicationTool:
     title: str
     category: str
     summary: str = ""
+    readme: str = ""
     tags: List[str] = field(default_factory=list)
     visibility: str = "public"
     moderation_state: str = "approved"
@@ -675,6 +682,10 @@ class ApplicationTool:
     appsuite_version: Optional[str] = None
     plugin_names: List[str] = field(default_factory=list)
     license_id: Optional[str] = None
+    star_count: int = 0
+    creator_display_name: Optional[str] = None
+    creator_verification_status: Optional[str] = None
+    used_by_environments: List[Dict[str, Any]] = field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -690,6 +701,7 @@ class ApplicationTool:
             slug=data.get("slug", ""),
             title=data.get("title", ""),
             summary=data.get("summary", ""),
+            readme=data.get("readme", ""),
             category=data.get("category", ""),
             tags=list(data.get("tags") or []),
             visibility=data.get("visibility", "public"),
@@ -701,6 +713,10 @@ class ApplicationTool:
             appsuite_version=data.get("appsuite_version"),
             plugin_names=list(data.get("plugin_names") or []),
             license_id=data.get("license_id"),
+            star_count=int(data.get("star_count", 0)),
+            creator_display_name=data.get("creator_display_name"),
+            creator_verification_status=data.get("creator_verification_status"),
+            used_by_environments=list(data.get("used_by_environments") or []),
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
         )
