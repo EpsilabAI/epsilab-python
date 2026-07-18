@@ -22,6 +22,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 import webbrowser
@@ -2539,10 +2540,8 @@ def _interactive_action(raw: str, default_type: str) -> tuple[str, str]:
     if not stripped.startswith("/"):
         return raw, default_type
     command, _, content = stripped[1:].partition(" ")
-    if command not in {"analyze", "respond", "submit", "test"}:
-        raise ValueError(
-            "Unknown action type. Use /analyze, /respond, /test, /submit, or /quit."
-        )
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", command):
+        raise ValueError("Action type must use letters, numbers, underscores, or hyphens.")
     if not content.strip():
         raise ValueError(f"/{command} requires action content.")
     return content, command
@@ -2646,7 +2645,7 @@ def cmd_run_environment(args: argparse.Namespace) -> None:
         else:
             if args.json:
                 raise ValueError("--json requires --action for non-interactive output.")
-            _ok("\nEnter an action. Prefix with /analyze, /test, /respond, or /submit; /quit exits.")
+            _ok("\nEnter an action. Prefix with /<type> to select an action type; /quit exits.")
             while not terminal:
                 try:
                     raw_action = input("action> ")
@@ -3850,9 +3849,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_environment_p.add_argument("--action", help="Take one action and exit")
     run_environment_p.add_argument(
         "--action-type",
-        choices=["analyze", "respond", "submit", "test"],
         default="submit",
-        help="Action type for plain-text input (default: submit)",
+        help="Action type for plain-text input, such as submit or fill (default: submit)",
     )
     run_environment_p.add_argument("--task", help="Task ID (default: first train task)")
     run_environment_p.add_argument("--seed", type=int, default=42, help="Episode seed")
@@ -4044,6 +4042,12 @@ def _normalize_cli_argv(argv: List[str]) -> List[str]:
             continue
         if token == "run":
             next_index = index + 1
+            if next_index == len(normalized):
+                normalized.extend(["__environment", "--help"])
+                break
+            if normalized[next_index] in {"-h", "--help"}:
+                normalized.insert(next_index, "__environment")
+                break
             if (
                 next_index < len(normalized)
                 and "/" in normalized[next_index]

@@ -17,6 +17,7 @@ from epsilab.cli import (
     _active_profile,
     _encode_environment_action,
     _get_client,
+    _interactive_action,
     _normalize_cli_argv,
     _public_step_info,
     _load_config,
@@ -84,6 +85,28 @@ class TestParser:
             "x",
         ]
         assert _normalize_cli_argv(["run", "list"]) == ["run", "list"]
+        assert _normalize_cli_argv(["run", "--help"]) == [
+            "run",
+            "__environment",
+            "--help",
+        ]
+        assert _normalize_cli_argv(["run"]) == ["run", "__environment", "--help"]
+
+    def test_environment_run_accepts_custom_action_type(self):
+        args = build_parser().parse_args(
+            _normalize_cli_argv(
+                ["run", "epsilab/form-filler", "--action", "name: Ada", "--action-type", "fill"]
+            )
+        )
+        assert args.action_type == "fill"
+
+    def test_interactive_run_accepts_environment_defined_action_type(self):
+        assert _interactive_action("/check_logs order-service", "submit") == (
+            "order-service",
+            "check_logs",
+        )
+        with pytest.raises(ValueError, match="letters, numbers"):
+            _interactive_action("/bad.type value", "submit")
 
     def test_env_list_command(self):
         args = build_parser().parse_args(["env", "list", "--limit", "10"])
