@@ -973,7 +973,10 @@ def _deploy_environment(
         build_context=build_context, build_args=build_args,
     )
     oci_ref = upload["image_ref"]
-    digest = upload.get("content_digest", upload.get("image_ref", "").split("@")[-1])
+    if "@sha256:" in oci_ref:
+        digest = "sha256:" + oci_ref.split("@sha256:")[-1]
+    else:
+        digest = upload.get("content_digest", upload.get("image_ref", "").split("@")[-1])
     status(f"Image: {project['slug']}:{version}", ok=True)
     if digest:
         status(f"Digest: {digest[:20]}...", ok=True)
@@ -1013,69 +1016,96 @@ def _deploy_environment(
     source_digest = _content_digest(directory / "verifier.py") if detected.get("verifier") else digest
 
     tp_idem = _deterministic_idem_key("tp", namespace_id=namespace_id, slug=project["slug"], version=version, digest=digest)
-    tp = client.create_task_pack_release(
-        namespace_id=namespace_id,
-        name=f"{project['slug']}-tasks",
-        release_version=version,
-        artifact_ref=oci_ref,
-        artifact_digest=digest,
-        usage_policy="training",
-        license_id="apache-2.0",
-        members=members,
-        idempotency_key=tp_idem,
-    )
+    try:
+        tp = client.create_task_pack_release(
+            namespace_id=namespace_id,
+            name=f"{project['slug']}-tasks",
+            release_version=version,
+            artifact_ref=oci_ref,
+            artifact_digest=digest,
+            usage_policy="training",
+            license_id="apache-2.0",
+            members=members,
+            idempotency_key=tp_idem,
+        )
+    except ApiError as e:
+        if e.status_code != 409:
+            raise
+        tp = {}
     tp_release_id = str(tp.get("release_id", tp.get("id", "")))
     status(f"Task pack: {len(members)} tasks", ok=True)
 
     ver_idem = _deterministic_idem_key("ver", namespace_id=namespace_id, slug=project["slug"], version=version, digest=digest)
-    ver = client.create_verifier_release(
-        namespace_id=namespace_id,
-        name=f"{project['slug']}-verifier",
-        release_version=version,
-        runtime_ref=oci_ref,
-        runtime_digest=digest,
-        source_digest=source_digest,
-        evidence_schema_digest=source_digest,
-        reward_mode="binary",
-        idempotency_key=ver_idem,
-    )
+    try:
+        ver = client.create_verifier_release(
+            namespace_id=namespace_id,
+            name=f"{project['slug']}-verifier",
+            release_version=version,
+            runtime_ref=oci_ref,
+            runtime_digest=digest,
+            source_digest=source_digest,
+            evidence_schema_digest=source_digest,
+            reward_mode="binary",
+            idempotency_key=ver_idem,
+        )
+    except ApiError as e:
+        if e.status_code != 409:
+            raise
+        ver = {}
     ver_release_id = str(ver.get("release_id", ver.get("id", "")))
     status("Verifier registered", ok=True)
 
     env_idem = _deterministic_idem_key("env", listing_id=listing_id, version=version, digest=digest)
-    release = client.create_environment_release(
-        listing_id=listing_id,
-        release_version=version,
-        protocol_version="0.4.1",
-        runtime_ref=oci_ref,
-        runtime_digest=digest,
-        task_pack_release_id=tp_release_id,
-        verifier_release_id=ver_release_id,
-        action_schema_digest=source_digest,
-        observation_schema_digest=source_digest,
-        resource_policy={
-            "cpu_millis": 2000, "memory_bytes": 512 * 1024 * 1024,
-            "architecture": "amd64", "network_policy": "deny",
-            "runtime_interface": "foundation_native",
-        },
-        idempotency_key=env_idem,
-    )
-    status(f"Release: {release.release_id}", ok=True)
+    try:
+        release = client.create_environment_release(
+            listing_id=listing_id,
+            release_version=version,
+            protocol_version="0.4.1",
+            runtime_ref=oci_ref,
+            runtime_digest=digest,
+            task_pack_release_id=tp_release_id,
+            verifier_release_id=ver_release_id,
+            action_schema_digest=source_digest,
+            observation_schema_digest=source_digest,
+            resource_policy={
+                "cpu_millis": 2000, "memory_bytes": 512 * 1024 * 1024,
+                "architecture": "amd64", "network_policy": "deny",
+                "runtime_interface": "foundation_native",
+            },
+            idempotency_key=env_idem,
+        )
+    except ApiError as e:
+        if e.status_code != 409:
+            raise
+        release = None
+    if release is not None:
+        release_id = getattr(release, "release_id", None) or (release.get("release_id") if isinstance(release, dict) else "") or ""
+    else:
+        release_id = ""
+    status(f"Release: {release_id}", ok=True)
 
     if args.prod:
         step("Deploying")
-        deploy_result = client.create_deployment(
-            listing_id=listing_id,
-            environment_release_id=str(release.release_id),
-            alias="production",
-        )
+        deploy_alias = f"prod-v{version.replace('.', '-')}"
+        try:
+            deploy_result = client.create_deployment(
+                listing_id=listing_id,
+                environment_release_id=str(release_id),
+                alias=deploy_alias,
+                allowed_split="train",
+                export_policy="training_allowed",
+            )
+        except ApiError as e:
+            if e.status_code != 409:
+                raise
+            deploy_result = {}
         deploy_id = deploy_result.get("deployment_id", deploy_result.get("id", "?"))
         status(f"Deployed: {deploy_id}", ok=True)
 
     deploy_elapsed = time.monotonic() - deploy_start
     print()
     _ok(f"Deployed {project['slug']} v{version} ({deploy_elapsed:.1f}s)")
-    _ok(f"  Release:  {release.release_id}")
+    _ok(f"  Release:  {release_id}")
     _ok(f"  Tasks:    {len(members)}")
     if args.prod:
         _ok(f"  Status:   Live")
