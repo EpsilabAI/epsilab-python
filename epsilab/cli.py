@@ -2502,7 +2502,10 @@ def _resolve_environment_task(
     try:
         for task in client.iter_tasks(source="custom", page_size=100):
             task_id = task.get("task_id")
-            if isinstance(task_id, str) and task_id.startswith(f"{slug}-"):
+            capability = task.get("capability")
+            if isinstance(task_id, str) and (
+                task_id.startswith(f"{slug}-") or capability == slug
+            ):
                 candidates.append(task_id)
     except EpsilabError:
         _cli_logger.debug("Task discovery failed for %s", slug, exc_info=True)

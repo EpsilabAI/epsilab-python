@@ -20,6 +20,7 @@ from epsilab.cli import (
     _interactive_action,
     _normalize_cli_argv,
     _public_step_info,
+    _resolve_environment_task,
     _load_config,
     _resolve_api_key,
     _save_config,
@@ -107,6 +108,20 @@ class TestParser:
         )
         with pytest.raises(ValueError, match="letters, numbers"):
             _interactive_action("/bad.type value", "submit")
+
+    def test_environment_task_discovery_uses_published_capability(self):
+        class Client:
+            def iter_tasks(self, **_kwargs):
+                return iter([
+                    {"task_id": "unrelated-task", "capability": "other"},
+                    {"task_id": "form-contact-001", "capability": "form-filler"},
+                ])
+
+        assert _resolve_environment_task(
+            Client(),
+            slug="form-filler",
+            explicit_task_id=None,
+        ) == "form-contact-001"
 
     def test_env_list_command(self):
         args = build_parser().parse_args(["env", "list", "--limit", "10"])
