@@ -2641,6 +2641,11 @@ def cmd_run_environment(args: argparse.Namespace) -> None:
             terminal = result.done
             if not args.json:
                 _display_environment_step(result)
+            if result.done and result.reward is None:
+                reason = _public_step_info(result.info).get(
+                    "terminal_reason", "unknown error"
+                )
+                raise RuntimeError(f"Environment action failed ({reason}).")
             return result.done
 
         if args.action is not None:

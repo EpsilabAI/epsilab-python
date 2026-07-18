@@ -1336,6 +1336,66 @@ class TestRunEnvironmentCommand:
 
         assert cancelled == ["/v1/environment-sessions/sess-2/cancel"]
 
+    def test_terminal_step_without_reward_exits_with_failure(self, capsys):
+        def handler(req):
+            if req.method == "GET" and req.url.path == "/v1/environment-listings":
+                return _json_response(
+                    [
+                        {
+                            "listing_id": "lst-1",
+                            "namespace_id": "ns-1",
+                            "namespace": "epsilab",
+                            "slug": "bug-hunter",
+                            "title": "Bug Hunter",
+                            "deployment_id": "dep-1",
+                        }
+                    ]
+                )
+            if req.method == "POST" and req.url.path.endswith("/sessions"):
+                return _json_response(
+                    {
+                        "session_id": "sess-error",
+                        "task_id": "bug-hunter-task",
+                        "status": "active",
+                        "session_token": "token",
+                        "observation": "Ready.",
+                    },
+                    status=202,
+                )
+            if req.method == "POST" and req.url.path.endswith("/step"):
+                return _json_response(
+                    {
+                        "observation": "The hosted environment could not complete this action.",
+                        "reward": None,
+                        "terminated": False,
+                        "truncated": True,
+                        "info": {
+                            "terminal_reason": "error",
+                            "provider_key": "not-public",
+                        },
+                    }
+                )
+            raise AssertionError(f"unexpected request: {req.method} {req.url.path}")
+
+        client = _mock_client(handler)
+        with patch("epsilab.cli._get_client", return_value=client):
+            with pytest.raises(SystemExit) as exc_info:
+                main(
+                    [
+                        "run",
+                        "epsilab/bug-hunter",
+                        "--task",
+                        "bug-hunter-task",
+                        "--action",
+                        '{"unexpected":true}',
+                    ]
+                )
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Environment action failed (error)." in captured.err
+        assert "not-public" not in captured.out + captured.err
+
 
 class TestRootDeployCommand:
     def test_repairs_empty_project_ids_and_creates_openenv_deployment(
