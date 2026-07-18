@@ -2777,6 +2777,7 @@ class TestUpdateListing:
             captured["method"] = req.method
             captured["path"] = req.url.path
             captured["body"] = json.loads(req.content)
+            captured["idempotency_key"] = req.headers.get("Idempotency-Key")
             return _json_response(
                 {
                     "listing_id": "lst-1",
@@ -2789,11 +2790,16 @@ class TestUpdateListing:
 
         client = _make_client(httpx.MockTransport(capture))
         result = client.update_listing(
-            "lst-1", expected_revision=2, title="Updated Title", visibility="public"
+            "lst-1",
+            expected_revision=2,
+            title="Updated Title",
+            visibility="public",
+            idempotency_key="listing-update-1",
         )
         assert captured["method"] == "PATCH"
         assert captured["path"] == "/v1/environment-listings/lst-1"
         assert captured["body"]["expected_revision"] == 2
+        assert captured["idempotency_key"] == "listing-update-1"
         assert isinstance(result, EnvironmentListing)
         assert result.title == "Updated Title"
 

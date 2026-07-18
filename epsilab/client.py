@@ -3780,6 +3780,9 @@ class EpsilabClient:
             "PATCH",
             f"/v1/environment-listings/{self._path_segment(listing_id)}",
             json_body=body,
+            extra_headers={
+                "Idempotency-Key": idempotency_key or self._auto_idem_key()
+            },
         )
         return EnvironmentListing.from_dict(data)
 
