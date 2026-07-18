@@ -3607,6 +3607,8 @@ class EpsilabClient:
         summary: Optional[str] = None,
         readme: Optional[str] = None,
         visibility: str = "public",
+        domain: Optional[str] = None,
+        tags: Optional[List[str]] = None,
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentListing":
         """Create an environment listing (creator operation).
@@ -3618,6 +3620,8 @@ class EpsilabClient:
             summary: Short description.
             readme: Long-form description (Markdown, up to 32 000 chars).
             visibility: ``private``, ``unlisted``, ``shared``, or ``public``.
+            domain: Environment domain (e.g. ``coding``, ``web``, ``ops``).
+            tags: List of free-form tags.
             idempotency_key: Unique key for at-most-once delivery.
 
         Returns:
@@ -3634,6 +3638,10 @@ class EpsilabClient:
             body["readme"] = readme
         if visibility:
             body["visibility"] = visibility
+        if domain:
+            body["domain"] = domain
+        if tags:
+            body["tags"] = tags
         data = self._request(
             "POST", "/v1/environment-listings", json_body=body,
             extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},
@@ -3749,6 +3757,8 @@ class EpsilabClient:
         summary: Optional[str] = None,
         readme: Optional[str] = None,
         visibility: Optional[str] = None,
+        domain: Optional[str] = None,
+        tags: Optional[List[str]] = None,
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentListing":
         """Update a listing's metadata (creator operation).
@@ -3762,6 +3772,8 @@ class EpsilabClient:
             summary: New summary.
             readme: New long-form description (Markdown, up to 32 000 chars).
             visibility: New visibility.
+            domain: Environment domain (e.g. ``coding``, ``web``, ``ops``).
+            tags: List of free-form tags.
             idempotency_key: Unique key for at-most-once delivery.
 
         Returns:
@@ -3776,6 +3788,10 @@ class EpsilabClient:
             body["readme"] = readme
         if visibility:
             body["visibility"] = visibility
+        if domain is not None:
+            body["domain"] = domain
+        if tags is not None:
+            body["tags"] = tags
         data = self._request(
             "PATCH",
             f"/v1/environment-listings/{self._path_segment(listing_id)}",

@@ -700,7 +700,15 @@ def _create_namespace(client: EpsilabClient, directory: Path, *, auto: bool = Fa
         raise
 
 
-def _resolve_listing(client: EpsilabClient, namespace_id: str, slug: str, title: str, summary: str) -> Any:
+def _resolve_listing(
+    client: EpsilabClient,
+    namespace_id: str,
+    slug: str,
+    title: str,
+    summary: str,
+    domain: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+) -> Any:
     """Find an existing listing by slug or create a new one."""
     listings = client.list_environment_listings(limit=100)
     existing = next(
@@ -709,11 +717,24 @@ def _resolve_listing(client: EpsilabClient, namespace_id: str, slug: str, title:
     )
     if existing:
         _ok(f"  Found existing listing: {existing.slug} ({existing.listing_id[:8]}...)")
+        if domain or tags:
+            try:
+                rev = getattr(existing, "revision", None) or 1
+                client.update_listing(
+                    existing.listing_id,
+                    expected_revision=rev,
+                    domain=domain,
+                    tags=tags,
+                )
+                _ok(f"  Updated listing metadata (domain={domain})")
+            except Exception:
+                pass
         return existing
     try:
         listing = client.create_listing(
             namespace_id=namespace_id, slug=slug,
             title=title, summary=summary, visibility="public",
+            domain=domain, tags=tags,
         )
         _ok(f"  Created listing: {listing.slug}")
         return listing
@@ -829,7 +850,11 @@ def cmd_deploy(args: argparse.Namespace) -> None:
                     "title": tool.title,
                 }
             else:
-                listing = _resolve_listing(client, namespace_id, slug, title, summary)
+                listing = _resolve_listing(
+                    client, namespace_id, slug, title, summary,
+                    domain=(project or {}).get("domain"),
+                    tags=(project or {}).get("tags"),
+                )
                 project = {
                     **(project or {}),
                     "type": "environment",
@@ -853,6 +878,8 @@ def cmd_deploy(args: argparse.Namespace) -> None:
                 slug,
                 title,
                 project.get("summary", ""),
+                domain=project.get("domain"),
+                tags=project.get("tags"),
             )
             project.update(
                 {
