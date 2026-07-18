@@ -24,19 +24,35 @@ pip install epsilab[all]             # everything
 
 ### Deploy an environment
 
-```bash
+~~~bash
 epsilab login
-epsilab env init my-environment
+epsilab whoami
+epsilab init my-environment
 cd my-environment
-# implement your logic in server.py, add tasks to tasks.json
+# edit environment.py and tasks.json
 epsilab deploy
-```
+~~~
 
-One command builds, uploads, and registers. No registry credentials needed.
+The deploy command creates the namespace and listing when needed, builds the
+image, uploads it, registers immutable task and verifier releases, and makes
+the environment available for hosted sessions. No UUIDs or registry
+credentials are required.
 
 ### Run an environment
 
-```python
+~~~bash
+epsilab run epsilab/bug-hunter
+epsilab run epsilab/bug-hunter \
+  --task bug-hunter-easy-train-001 \
+  --action 'BUG_LINE: 6
+FIX:
+return total / len(numbers)'
+~~~
+
+The first form starts an interactive session. The second performs one action
+and prints its observation, reward, terminal state, and verification result.
+
+~~~python
 from epsilab import Epsilab
 
 # Credentials are loaded automatically from `epsilab login`
@@ -53,9 +69,13 @@ session = client.create_environment_session(
     task_id="bug-hunter-easy-train-001",
     seed=42,
 )
+session = client.wait_for_session(session)
 result = client.environment_step(
     session.session_id,
-    "The bug is a missing null check in the handler.",
+    {
+        "action_type": "submit",
+        "content": "BUG_LINE: 6\nFIX:\nreturn total / len(numbers)",
+    },
     session_token=session.session_token,
 )
 print(f"Reward: {result.reward}, Done: {result.done}")
@@ -65,7 +85,7 @@ export = client.create_environment_export(
     deployment_id=listings[0].deployment_id,
     format="grpo",
 )
-```
+~~~
 
 ### Post-training with multiple environments
 
@@ -98,20 +118,28 @@ An RL environment is a containerized task server. At minimum it needs:
 
 | File | Purpose |
 |------|---------|
+| `environment.py` | Typed, deterministic OpenEnv environment logic |
+| `verifier.py` | Independent trajectory replay and reward verification |
 | `Dockerfile` | Builds the runtime container image |
-| `server.py` | HTTP server implementing the environment protocol |
+| `server.py` | Generated OpenEnv HTTP entry point |
 | `tasks.json` | JSON array defining the task set |
+| `.epsilab/project.json` | Local project linkage, populated on first deploy |
 
 ### Environment protocol
 
-Your server must expose two HTTP endpoints:
+The generated server uses the OpenEnv contract and exposes:
 
-```
-POST /reset   -> {"observation": str}
-POST /step    -> {"observation": str, "reward": float, "terminated": bool, "truncated": bool}
-```
+~~~
+GET  /health
+POST /reset
+POST /step
+WS   /ws
+~~~
 
-`/reset` receives `{"task_id": "...", "seed": 42}` and returns the initial observation. `/step` receives `{"action": "..."}` and returns the step result.
+`/reset` accepts a task ID and deterministic seed. `/step` accepts a typed
+action and returns an observation, optional reward, and terminal state. Most
+authors only edit `environment.py`; the generated server and verifier already
+implement the transport and replay contracts.
 
 ### tasks.json format
 
@@ -149,8 +177,9 @@ epsilab deploy    # auto-detects tool structure
 | `epsilab login` | Authenticate with your API key |
 | `epsilab logout` | Remove stored credentials |
 | `epsilab whoami` | Show current auth and profile status |
-| `epsilab deploy` | Build, upload, and register an environment or tool |
-| `epsilab env init [slug]` | Scaffold a new environment project |
+| `epsilab init [name]` | Scaffold a working environment project |
+| `epsilab deploy` | Build, upload, register, and host an environment or tool |
+| `epsilab run <owner>/<name>` | Run an interactive or one-step hosted session |
 | `epsilab env list` | List your environment listings |
 | `epsilab env search [query]` | Search the hub |
 | `epsilab env verify` | Run local preflight checks |

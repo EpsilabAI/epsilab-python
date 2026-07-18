@@ -2273,6 +2273,35 @@ class TestCreateEnvironmentSession:
         assert result.observation == "Write fibonacci..."
 
 
+class TestWaitForEnvironmentSession:
+    def test_preserves_create_only_session_token_after_polling(self):
+        def capture(req: httpx.Request) -> httpx.Response:
+            assert req.method == "GET"
+            assert req.url.path == "/v1/environment-sessions/sess-1"
+            return _json_response(
+                {
+                    "session_id": "sess-1",
+                    "task_id": "task-1",
+                    "status": "active",
+                    "observation": "ready",
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        initial = EnvironmentSession(
+            session_id="sess-1",
+            task_id="task-1",
+            status="provisioning",
+            session_token="secret-token",
+            session_token_expires_at="2026-07-19T00:00:00Z",
+        )
+        result = client.wait_for_session(initial, poll_interval=0, timeout=1)
+
+        assert result.status == "active"
+        assert result.session_token == "secret-token"
+        assert result.session_token_expires_at == "2026-07-19T00:00:00Z"
+
+
 class TestGetEnvironmentSession:
     def test_basic(self):
         captured = {}
@@ -2327,6 +2356,37 @@ class TestEnvironmentStep:
         assert result.observation == "2/3 tests pass"
         assert result.reward == 0.67
         assert result.done is False
+
+    def test_structured_action_is_serialized_deterministically(self):
+        captured = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {
+                    "observation": "done",
+                    "reward": 1.0,
+                    "terminated": True,
+                    "truncated": False,
+                    "info": {},
+                }
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        client.environment_step(
+            "sess-1",
+            {"content": "answer", "action_type": "submit"},
+        )
+
+        assert json.loads(captured["body"]["action"]) == {
+            "action_type": "submit",
+            "content": "answer",
+        }
+
+    def test_rejects_unsupported_action_type(self):
+        client = _make_client(httpx.MockTransport(lambda req: _json_response({})))
+        with pytest.raises(TypeError, match="string or dictionary"):
+            client.environment_step("sess-1", ["not", "valid"])  # type: ignore[arg-type]
 
 
 class TestCancelEnvironmentSession:

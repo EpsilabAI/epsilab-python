@@ -26,37 +26,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
-from pathlib import Path
 
 from epsilab import Epsilab
 
-
-# ── Environment discovery ────────────────────────────────────────
-
-
-def resolve_environments(client: Epsilab, env_spec: str) -> list[dict]:
-    """Resolve --envs into a list of {slug, deployment_id, task_id} dicts."""
-    listings = client.list_environment_listings(limit=200)
-    available = [l for l in listings if l.deployment_id]
-
-    if env_spec == "all":
-        envs = [{"slug": l.slug, "deployment_id": l.deployment_id} for l in available]
-    else:
-        slugs = [s.strip() for s in env_spec.split(",") if s.strip()]
-        available_map = {l.slug: l for l in available}
-        envs = []
-        for slug in slugs:
-            if slug not in available_map:
-                avail = sorted(available_map.keys())[:15]
-                raise SystemExit(f"Environment '{slug}' not found.\nAvailable: {', '.join(avail)}")
-            l = available_map[slug]
-            envs.append({"slug": l.slug, "deployment_id": l.deployment_id})
-
-    for env in envs:
-        env["task_id"] = f"{env['slug']}-train-easy-001"
-    return envs
-
+from _environment_utils import (
+    resolve_environments,
+    submission,
+    task_ids_for_environment,
+)
 
 # ── Scoring ──────────────────────────────────────────────────────
 
@@ -75,7 +52,8 @@ def score_completions(
             session = client.create_environment_session(deployment_id, task_id=task_id)
             session = client.wait_for_session(session)
             result = client.environment_step(
-                session.session_id, completion,
+                session.session_id,
+                submission(completion),
                 session_token=session.session_token,
             )
             rewards.append(result.reward or 0.0)
@@ -149,7 +127,7 @@ def train_tinker(
                 sampling_client = await training_client.save_weights_and_get_sampling_client()
 
         await training_client.save_weights_and_get_sampling_client()
-        print(f"\n  Training complete. Model checkpoint saved on Tinker.")
+        print("\n  Training complete. Model checkpoint saved on Tinker.")
 
     asyncio.run(_train())
 
@@ -213,7 +191,7 @@ def train_fireworks(
             training_client.forward_backward_custom([datum], lambda d, lp: None).result()
             training_client.optim_step(tinker.AdamParams(learning_rate=5e-5)).result()
 
-        print(f"\n  Training complete.")
+        print("\n  Training complete.")
 
     asyncio.run(_train())
 
@@ -287,6 +265,11 @@ def main():
 
     print("\n  Resolving environments ...")
     environments = resolve_environments(epsilab_client, args.envs)
+    for environment in environments:
+        environment["task_id"] = task_ids_for_environment(
+            epsilab_client,
+            environment["slug"],
+        )[0]
     print(f"  {len(environments)} environment(s): {', '.join(e['slug'] for e in environments)}")
 
     print("=" * 60)
@@ -305,7 +288,7 @@ def main():
     ]
 
     print(f"\n  Training for {args.steps} steps across {len(environments)} env(s)")
-    print(f"  Each step: sample 4 completions, score via environment, update\n")
+    print("  Each step: sample 4 completions, score via environment, update\n")
 
     try:
         TRAINERS[args.provider](epsilab_client, args.model, prompts, environments, args.steps)

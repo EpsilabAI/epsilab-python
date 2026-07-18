@@ -2,7 +2,9 @@
 
 Usage::
 
+    epsilab init my-environment       # scaffold a working environment
     epsilab deploy                    # build, push, and register (one command)
+    epsilab run owner/environment     # run a hosted environment
     epsilab login
     epsilab whoami
     epsilab env list / search / create / push / deploy / session / batch / export
@@ -464,8 +466,8 @@ def cmd_env_create(args: argparse.Namespace) -> None:
         _ok(f"  title: {listing.title}")
         _ok(f"  visibility: {listing.visibility}")
         _ok("\nNext steps:")
-        _ok(f"  cd your-environment-directory/")
-        _ok(f"  epsilab deploy")
+        _ok("  cd your-environment-directory/")
+        _ok("  epsilab deploy")
         _ok(f"\nManage this listing at {_DASHBOARD_URL} (My Environments)")
     except EpsilabError as e:
         _err(_friendly_error(e))
@@ -494,6 +496,8 @@ def _detect_project_type(directory: Path) -> dict:
         detected["dockerfile"] = True
     if (directory / "server.py").exists():
         detected["server"] = True
+    if (directory / "environment.py").exists():
+        detected["environment"] = True
     if (directory / "plugin.py").exists():
         detected["plugin"] = True
     if (directory / "api.py").exists():
@@ -562,7 +566,7 @@ def _docker_build_and_upload(
     for k, v in (build_args or {}).items():
         cmd.extend(["--build-arg", f"{k}={v}"])
     cmd.extend(["-t", local_tag, "-f", str(directory / "Dockerfile"), str(ctx)])
-    _ok(f"  Building image ...")
+    _ok("  Building image ...")
     _cli_logger.debug("docker build: %s", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -572,7 +576,7 @@ def _docker_build_and_upload(
         tarball_path = tmp.name
 
     try:
-        _ok(f"  Saving image ...")
+        _ok("  Saving image ...")
         save = subprocess.run(
             ["docker", "save", "-o", tarball_path, local_tag],
             capture_output=True, text=True, timeout=300,
@@ -585,7 +589,7 @@ def _docker_build_and_upload(
 
         upload_result = client.upload_image(tarball_path, tag=image_tag)
 
-        _ok(f"  Uploaded successfully")
+        _ok("  Uploaded successfully")
         return upload_result
     finally:
         Path(tarball_path).unlink(missing_ok=True)
@@ -606,10 +610,13 @@ def _resolve_namespace(client: EpsilabClient, directory: Path, *, auto: bool = F
         return explicit_id
 
     ns_map: dict[str, str] = {}
+    namespace_usage: dict[str, int] = {}
     listings = client.list_environment_listings(limit=100)
     for li in listings:
-        if li.namespace_id and li.namespace_id not in ns_map:
+        if li.is_owner and li.namespace_id and li.namespace_id not in ns_map:
             ns_map[li.namespace_id] = li.namespace or li.namespace_id[:12]
+        if li.is_owner and li.namespace_id:
+            namespace_usage[li.namespace_id] = namespace_usage.get(li.namespace_id, 0) + 1
     try:
         tools = client.list_application_tools(limit=100)
         for t in tools:
@@ -622,6 +629,11 @@ def _resolve_namespace(client: EpsilabClient, directory: Path, *, auto: bool = F
 
     if len(ns_map) == 1:
         ns_id = next(iter(ns_map))
+        _ok(f"  Using namespace: {ns_map[ns_id]}")
+        return ns_id
+
+    if len(ns_map) > 1 and auto:
+        ns_id = max(ns_map, key=lambda value: (namespace_usage.get(value, 0), ns_map[value]))
         _ok(f"  Using namespace: {ns_map[ns_id]}")
         return ns_id
 
@@ -638,7 +650,17 @@ def _resolve_namespace(client: EpsilabClient, directory: Path, *, auto: bool = F
 
 def _create_namespace(client: EpsilabClient, directory: Path, *, auto: bool = False) -> str:
     """Create a namespace, interactively or from the directory name."""
-    default_slug = directory.parent.name.lower().replace(" ", "-").replace("_", "-")
+    import re
+
+    default_slug = ""
+    try:
+        profile = client.get_creator_profile()
+        default_slug = str(profile.get("display_name", ""))
+    except EpsilabError:
+        _cli_logger.debug("Creator profile unavailable while selecting a namespace", exc_info=True)
+    default_slug = re.sub(r"[^a-z0-9]+", "-", default_slug.lower()).strip("-")
+    if len(default_slug) < 3:
+        default_slug = directory.parent.name.lower().replace(" ", "-").replace("_", "-")
     if len(default_slug) < 3:
         default_slug = directory.name.lower().replace(" ", "-").replace("_", "-")
     if auto or not is_interactive():
@@ -716,7 +738,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
             _err(
                 f"Directory is empty: {directory}\n\n"
                 "  To create an RL environment:\n"
-                "    epsilab env init\n\n"
+                "    epsilab init my-environment\n\n"
                 "  An environment needs at minimum:\n"
                 "    Dockerfile     — builds the runtime container\n"
                 "    tasks.json     — defines the task set\n"
@@ -742,7 +764,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
             "  Environment needs:        Dockerfile + tasks.json\n"
             "  Application Tool needs:   plugin.py + api.py + state.py\n"
             + (f"\n{hint_str}\n" if hint_str else "") +
-            "\n  Run 'epsilab env init' to scaffold a new environment."
+            "\n  Run 'epsilab init my-environment' to scaffold a new environment."
         )
 
     if project_type == "tool":
@@ -750,6 +772,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
         status("plugin.py", ok=True)
         status("api.py", ok=detected.get("api", False))
         status("state.py", ok=detected.get("state", False))
+        status("environment.py", ok=detected.get("environment", False))
         status("server.py", ok=detected.get("server", False))
     else:
         step("Detected environment")
@@ -767,21 +790,21 @@ def cmd_deploy(args: argparse.Namespace) -> None:
         if project:
             pid = project.get("listing_id") or project.get("tool_id") or "?"
             _ok(f"\n  Linked to {project.get('slug', '?')} ({pid[:8]}...)")
-        else:
+        if not project or not project.get("namespace_id"):
             step("Set up project")
-            if not is_interactive() and not args.yes:
+            if not project and not is_interactive() and not args.yes:
                 _err("No .epsilab/project.json found. Run interactively or use --yes.")
 
             namespace_id = _resolve_namespace(
                 client, directory,
                 auto=args.yes,
-                explicit_id=getattr(args, "namespace_id", None),
+                explicit_id=(project or {}).get("namespace_id") or getattr(args, "namespace_id", None),
             )
 
-            slug = directory.name
-            title = slug.replace("-", " ").replace("_", " ").title()
-            summary = ""
-            if is_interactive() and not args.yes:
+            slug = (project or {}).get("slug") or (project or {}).get("name") or directory.name
+            title = (project or {}).get("title") or slug.replace("-", " ").replace("_", " ").title()
+            summary = (project or {}).get("summary", "")
+            if not project and is_interactive() and not args.yes:
                 slug = text("Slug", default=slug)
                 title = text("Title", default=title)
                 summary = text("Summary", default="")
@@ -792,6 +815,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
                     category = text("Category", default=category)
                 tool = _resolve_tool(client, namespace_id, slug, title, summary, category)
                 project = {
+                    **(project or {}),
                     "type": "tool",
                     "tool_id": tool.tool_id,
                     "namespace_id": namespace_id,
@@ -801,14 +825,40 @@ def cmd_deploy(args: argparse.Namespace) -> None:
             else:
                 listing = _resolve_listing(client, namespace_id, slug, title, summary)
                 project = {
+                    **(project or {}),
                     "type": "environment",
                     "listing_id": listing.listing_id,
                     "namespace_id": namespace_id,
                     "slug": listing.slug,
                     "title": listing.title,
+                    "namespace": listing.namespace or (project or {}).get("namespace", ""),
                 }
             _save_project(directory, project)
-            _ok(f"  Saved to .epsilab/project.json")
+            _ok("  Saved to .epsilab/project.json")
+
+        elif project_type == "environment" and not project.get("listing_id"):
+            step("Set up project")
+            namespace_id = project["namespace_id"]
+            slug = project.get("slug") or project.get("name") or directory.name
+            title = project.get("title") or slug.replace("-", " ").replace("_", " ").title()
+            listing = _resolve_listing(
+                client,
+                namespace_id,
+                slug,
+                title,
+                project.get("summary", ""),
+            )
+            project.update(
+                {
+                    "type": "environment",
+                    "listing_id": listing.listing_id,
+                    "slug": listing.slug,
+                    "title": listing.title,
+                    "namespace": listing.namespace or project.get("namespace", ""),
+                }
+            )
+            _save_project(directory, project)
+            _ok("  Saved listing to .epsilab/project.json")
 
         namespace_id = project["namespace_id"]
 
@@ -840,7 +890,6 @@ def _infer_tool_category(directory: Path) -> str:
 
 def _resolve_tool(client: EpsilabClient, namespace_id: str, slug: str, title: str, summary: str, category: str) -> Any:
     """Find an existing tool by slug or create a new one."""
-    from .models import ApplicationTool
     tools = client.list_application_tools(limit=100)
     existing = next(
         (t for t in tools if t.slug == slug and t.namespace_id == namespace_id),
@@ -875,7 +924,7 @@ def _deploy_tool(
     """Build and register an Application Tool release."""
     import subprocess
 
-    version = args.version or "0.1.0"
+    version = args.version or project.get("version") or "1.0.0"
     if is_interactive() and not args.yes and not args.version:
         version = text("Version", default=version)
 
@@ -952,8 +1001,8 @@ def _deploy_environment(
     """Build, upload, and register an environment release."""
     listing_id = project["listing_id"]
 
-    version = args.version or "0.1.0"
-    if is_interactive() and not args.yes and not args.version:
+    version = args.version or project.get("version") or "1.0.0"
+    if is_interactive() and not args.yes and not args.version and not project.get("version"):
         version = text("Version", default=version)
 
     image_tag = f"{project['slug']}:{version}"
@@ -989,15 +1038,19 @@ def _deploy_environment(
         for t in tasks:
             task_body = {
                 "task_id": t["task_id"],
-                "domain": t.get("domain", project["slug"]),
+                "domain": t.get("domain", project.get("domain", project["slug"])),
                 "capability": t.get("capability", project["slug"]),
                 "prompt": t.get("prompt", t.get("title", t["task_id"])),
                 "verification": t.get("verification", "judge"),
                 "difficulty": t.get("difficulty", "medium"),
                 "max_steps": t.get("max_steps", 50),
             }
-            if t.get("ground_truth") or t.get("expected_fix"):
-                task_body["ground_truth"] = t.get("ground_truth") or t.get("expected_fix", "")
+            if t.get("ground_truth") or t.get("expected_fix") or t.get("expected_answer"):
+                task_body["ground_truth"] = (
+                    t.get("ground_truth")
+                    or t.get("expected_fix")
+                    or t.get("expected_answer", "")
+                )
             try:
                 client.create_task(task_body)
             except ApiError as e:
@@ -1031,7 +1084,10 @@ def _deploy_environment(
     except ApiError as e:
         if e.status_code != 409:
             raise
-        tp = {}
+        _err(
+            f"Release version {version} already exists with different task-pack content. "
+            "Choose a new version with --version."
+        )
     tp_release_id = str(tp.get("release_id", tp.get("id", "")))
     status(f"Task pack: {len(members)} tasks", ok=True)
 
@@ -1051,7 +1107,10 @@ def _deploy_environment(
     except ApiError as e:
         if e.status_code != 409:
             raise
-        ver = {}
+        _err(
+            f"Release version {version} already exists with different verifier content. "
+            "Choose a new version with --version."
+        )
     ver_release_id = str(ver.get("release_id", ver.get("id", "")))
     status("Verifier registered", ok=True)
 
@@ -1070,20 +1129,24 @@ def _deploy_environment(
             resource_policy={
                 "cpu_millis": 2000, "memory_bytes": 512 * 1024 * 1024,
                 "architecture": "amd64", "network_policy": "deny",
-                "runtime_interface": "foundation_native",
+                "runtime_interface": "openenv",
             },
             idempotency_key=env_idem,
         )
     except ApiError as e:
         if e.status_code != 409:
             raise
-        release = None
+        _err(
+            f"Environment version {version} already exists with different content. "
+            "Choose a new version with --version."
+        )
     if release is not None:
         release_id = getattr(release, "release_id", None) or (release.get("release_id") if isinstance(release, dict) else "") or ""
     else:
         release_id = ""
     status(f"Release: {release_id}", ok=True)
 
+    deploy_id = ""
     if args.prod:
         step("Deploying")
         deploy_alias = f"prod-v{version.replace('.', '-')}"
@@ -1098,19 +1161,44 @@ def _deploy_environment(
         except ApiError as e:
             if e.status_code != 409:
                 raise
-            deploy_result = {}
-        deploy_id = deploy_result.get("deployment_id", deploy_result.get("id", "?"))
+            refreshed = client.get_environment_listing(listing_id)
+            if not refreshed.deployment_id:
+                raise
+            deploy_result = {"deployment_id": refreshed.deployment_id}
+        deploy_id = str(deploy_result.get("deployment_id", deploy_result.get("id", "")))
         status(f"Deployed: {deploy_id}", ok=True)
+
+    project.update(
+        {
+            "version": version,
+            "environment_release_id": release_id,
+            "deployment_id": deploy_id or project.get("deployment_id", ""),
+        }
+    )
+    try:
+        refreshed_listing = client.get_environment_listing(listing_id)
+        if refreshed_listing.namespace:
+            project["namespace"] = refreshed_listing.namespace
+        if refreshed_listing.deployment_id:
+            project["deployment_id"] = refreshed_listing.deployment_id
+    except EpsilabError:
+        _cli_logger.debug("Could not refresh listing metadata after deploy", exc_info=True)
+    _save_project(directory, project)
 
     deploy_elapsed = time.monotonic() - deploy_start
     print()
-    _ok(f"Deployed {project['slug']} v{version} ({deploy_elapsed:.1f}s)")
+    _ok(f"Deployed {project['slug']}@{version} ({deploy_elapsed:.1f}s)")
     _ok(f"  Release:  {release_id}")
     _ok(f"  Tasks:    {len(members)}")
     if args.prod:
-        _ok(f"  Status:   Live")
+        _ok("  Status:   Live")
+        owner = project.get("namespace") or project.get("namespace_slug")
+        if owner:
+            _ok(f"  Run it:   epsilab run {owner}/{project['slug']}")
+        else:
+            _ok(f"  Run it:   epsilab run <owner>/{project['slug']}")
     else:
-        _ok(f"\n  Run with --prod to deploy for hosted execution.")
+        _ok("\n  Run with --prod to deploy for hosted execution.")
 
 
 def _find_manifest(args: argparse.Namespace) -> tuple[dict, Path | None]:
@@ -1495,7 +1583,7 @@ def cmd_namespace_create(args: argparse.Namespace) -> None:
         _ok(f"\nNamespace created: {ns_id}")
         _ok(f"  slug: {slug}")
         _ok("\nDeploy an environment or tool:")
-        _ok(f"  cd your-project/ && epsilab deploy")
+        _ok("  cd your-project/ && epsilab deploy")
     except EpsilabError as e:
         _err(_friendly_error(e))
     finally:
@@ -1568,73 +1656,277 @@ def cmd_profile_create(args: argparse.Namespace) -> None:
 _TASKS_TEMPLATE = """\
 [
   {
-    "task_id": "%(slug)s-001",
-    "prompt": "Complete the task.",
+    "task_id": "%(slug)s-easy-train-001",
+    "domain": "general",
+    "capability": "instruction-following",
+    "prompt": "Reply with the exact phrase: hello epsilab",
+    "expected_answer": "hello epsilab",
+    "verification": "symbolic",
     "difficulty": "easy",
     "split": "train",
-    "max_steps": 10
+    "max_steps": 3,
+    "pass_threshold": 1.0
   }
 ]
 """
 
 _DOCKERFILE_TEMPLATE = """\
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY . .
-RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || true
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --no-deps openenv-core==0.3.0
+COPY . /app/
+RUN mkdir -p /opt && ln -s /app /opt/epsilab
 
-EXPOSE 8080
-CMD ["python", "server.py"]
+USER 65532:65532
+EXPOSE 8000
+HEALTHCHECK --interval=5s --timeout=2s --retries=6 CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=1)"]
+
+CMD ["python", "-B", "/app/server.py"]
 """
 
-_SERVER_TEMPLATE = """\
-\"\"\"Minimal environment server implementing the Epsilab protocol.
+_REQUIREMENTS_TEMPLATE = """\
+fastapi==0.139.0
+fastmcp==3.4.4
+websockets==16.1
+uvicorn==0.51.0
+pydantic==2.13.4
+"""
 
-The environment must expose:
-    POST /reset   -> {\"observation\": str}
-    POST /step    -> {\"observation\": str, \"reward\": float,
-                      \"terminated\": bool, \"truncated\": bool}
-\"\"\"
+_ENVIRONMENT_TEMPLATE = '''\
+"""A deterministic OpenEnv environment ready for local and hosted execution."""
+
+from __future__ import annotations
 
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
+from typing import Any
+
+from openenv.core import Action, Environment, Observation, State
+from openenv.core.env_server.types import EnvironmentMetadata
+from pydantic import Field
 
 
-class EnvironmentHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(content_length)) if content_length else {}
+class TextAction(Action):
+    content: str = Field(..., description="The agent response")
+    action_type: str = Field(default="submit", description="respond or submit")
 
-        if self.path == "/reset":
-            response = {"observation": "implement your initial observation here"}
-        elif self.path == "/step":
-            action = body.get("action", "")
-            response = {
-                "observation": f"received action: {action}",
-                "reward": 0.0,
-                "terminated": False,
-                "truncated": False,
-            }
-        else:
-            self.send_response(404)
-            self.end_headers()
-            return
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(response).encode())
+class TextObservation(Observation):
+    content: str
+    context: dict[str, Any] = Field(default_factory=dict)
+    terminated: bool = False
+    truncated: bool = False
+    info: dict[str, Any] = Field(default_factory=dict)
 
-    def log_message(self, format, *args):
-        pass
+
+class TaskState(State):
+    task_id: str = ""
+    task: dict[str, Any] = Field(default_factory=dict)
+    submitted: bool = False
+
+
+class ExampleEnvironment(Environment[TextAction, TextObservation, TaskState]):
+    SUPPORTS_CONCURRENT_SESSIONS = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._tasks = json.loads(Path(__file__).with_name("tasks.json").read_text())
+        self._state = TaskState()
+
+    def reset(
+        self,
+        seed: int | None = None,
+        episode_id: str | None = None,
+        task_id: str | None = None,
+    ) -> TextObservation:
+        del seed
+        task = self._resolve_task(task_id)
+        self._state = TaskState(
+            episode_id=episode_id,
+            task_id=task["task_id"],
+            task=task,
+        )
+        return TextObservation(
+            content=task["prompt"],
+            context={"task_id": task["task_id"], "difficulty": task["difficulty"]},
+        )
+
+    def step(self, action: TextAction) -> TextObservation:
+        if not self._state.task:
+            self.reset()
+        if self._state.submitted:
+            return TextObservation(
+                content="Episode already completed.",
+                done=True,
+                terminated=True,
+                info={"error": "already_completed"},
+            )
+        if action.action_type != "submit":
+            self._state = self._state.model_copy(
+                update={"step_count": self._state.step_count + 1}
+            )
+            return TextObservation(
+                content="Submit your final answer when ready.",
+                info={"step": self._state.step_count},
+            )
+
+        expected = str(self._state.task["expected_answer"]).strip().casefold()
+        reward = 1.0 if action.content.strip().casefold() == expected else 0.0
+        self._state = self._state.model_copy(update={"submitted": True})
+        return TextObservation(
+            content="Correct." if reward == 1.0 else "That answer is not correct.",
+            reward=reward,
+            done=True,
+            terminated=True,
+            info={"passed": reward == 1.0},
+        )
+
+    @property
+    def state(self) -> TaskState:
+        return self._state.model_copy(deep=True)
+
+    def close(self) -> None:
+        return None
+
+    def get_metadata(self) -> EnvironmentMetadata:
+        return EnvironmentMetadata(
+            name="__SLUG__",
+            description="A deterministic example environment",
+            version="1.0.0",
+        )
+
+    def _resolve_task(self, task_id: str | None) -> dict[str, Any]:
+        if task_id is None:
+            return self._tasks[0]
+        for task in self._tasks:
+            if task.get("task_id") == task_id:
+                return task
+        raise ValueError(f"unknown task_id: {task_id}")
+'''
+
+_SERVER_TEMPLATE = '''\
+"""HTTP entry point for the environment."""
+
+from openenv.core import create_fastapi_app
+
+from environment import ExampleEnvironment, TextAction, TextObservation
+
+
+app = create_fastapi_app(
+    ExampleEnvironment,
+    TextAction,
+    TextObservation,
+    max_concurrent_envs=8,
+)
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", 8080), EnvironmentHandler)
-    print("Environment server running on :8080")
-    server.serve_forever()
-"""
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+'''
+
+_VERIFIER_TEMPLATE = '''\
+"""Replay a completed trajectory and emit a strict verification result."""
+
+from __future__ import annotations
+
+import json
+import math
+import sys
+from typing import Any
+
+from environment import ExampleEnvironment, TextAction
+
+_MAX_INPUT_BYTES = 2 * 1024 * 1024
+
+
+def _main() -> None:
+    raw = sys.stdin.buffer.read(_MAX_INPUT_BYTES + 1)
+    if len(raw) > _MAX_INPUT_BYTES:
+        _invalid("trajectory_too_large")
+        return
+    try:
+        trajectory = json.loads(raw)
+        if not isinstance(trajectory, dict):
+            raise ValueError("trajectory must be an object")
+        steps = trajectory.get("steps")
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("trajectory has no steps")
+
+        environment = ExampleEnvironment()
+        try:
+            environment.reset(
+                seed=trajectory.get("seed") if isinstance(trajectory.get("seed"), int) else None,
+                task_id=str(trajectory["task_id"]),
+            )
+            result = None
+            for index, step in enumerate(steps):
+                if not isinstance(step, dict):
+                    raise ValueError(f"step {index} must be an object")
+                action = step.get("action")
+                if isinstance(action, str):
+                    action = json.loads(action)
+                if not isinstance(action, dict):
+                    raise ValueError(f"step {index} action must be an object")
+                result = environment.step(TextAction.model_validate(action))
+                _verify_claim(index, step, result)
+                if (result.terminated or result.truncated) and index != len(steps) - 1:
+                    raise ValueError("trajectory contains actions after termination")
+            if result is None or result.reward is None or not (result.terminated or result.truncated):
+                raise ValueError("trajectory is not terminal")
+            if isinstance(result.reward, bool):
+                raise ValueError("reward is invalid")
+            reward = float(result.reward)
+            if not math.isfinite(reward) or not 0.0 <= reward <= 1.0:
+                raise ValueError("reward is invalid")
+            print(json.dumps({
+                "status": "valid",
+                "reward": reward,
+                "terminated": bool(result.terminated),
+                "truncated": bool(result.truncated),
+                "tests_passed": 1 if reward == 1.0 else 0,
+                "tests_total": 1,
+            }, separators=(",", ":")))
+        finally:
+            environment.close()
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        _invalid("invalid_trajectory")
+    except Exception:
+        _invalid("verifier_failure")
+
+
+def _verify_claim(index: int, claimed: dict[str, Any], replayed: Any) -> None:
+    reward = claimed.get("reward")
+    if reward is None or replayed.reward is None:
+        if reward is not None or replayed.reward is not None:
+            raise ValueError(f"reward diverged at step {index}")
+    elif not math.isclose(float(reward), float(replayed.reward), abs_tol=1e-6):
+        raise ValueError(f"reward diverged at step {index}")
+    if claimed.get("terminated") is not bool(replayed.terminated):
+        raise ValueError(f"termination diverged at step {index}")
+    if claimed.get("truncated") is not bool(replayed.truncated):
+        raise ValueError(f"truncation diverged at step {index}")
+    observation = claimed.get("observation")
+    if isinstance(observation, dict):
+        observation = observation.get("content")
+    if isinstance(observation, str) and observation != replayed.content:
+        raise ValueError(f"observation diverged at step {index}")
+
+
+def _invalid(reason: str) -> None:
+    print(json.dumps({"status": "invalid", "reason": reason}, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    _main()
+'''
 
 
 def cmd_env_verify(args: argparse.Namespace) -> None:
@@ -1647,6 +1939,7 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
     manifest_path = target / (args.manifest or "epsilab.json")
     dockerfile = target / "Dockerfile"
     server_py = target / "server.py"
+    environment_py = target / "environment.py"
     errors: list[str] = []
     warnings: list[str] = []
     passed: list[str] = []
@@ -1704,19 +1997,28 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
                     errors.append(f"verifier.runtime_digest is not valid: {digest}")
 
     # ── 2. File structure checks ──────────────────────────────────
+    if environment_py.exists():
+        passed.append("environment.py exists")
+        try:
+            compile(environment_py.read_text(), str(environment_py), "exec")
+            passed.append("environment.py is valid Python")
+        except SyntaxError as exc:
+            errors.append(f"environment.py is invalid Python: {exc}")
+
     if server_py.exists():
         passed.append("server.py exists")
         source = server_py.read_text()
-        if "/reset" not in source:
+        uses_openenv = "create_fastapi_app" in source
+        if "/reset" not in source and not uses_openenv:
             errors.append("server.py does not contain a /reset endpoint")
         else:
             passed.append("server.py references /reset endpoint")
-        if "/step" not in source:
+        if "/step" not in source and not uses_openenv:
             errors.append("server.py does not contain a /step endpoint")
         else:
             passed.append("server.py references /step endpoint")
-        if "8080" not in source and "PORT" not in source:
-            warnings.append("server.py does not reference port 8080 or PORT")
+        if "8000" not in source and "PORT" not in source:
+            warnings.append("server.py does not reference port 8000 or PORT")
     else:
         warnings.append("server.py not found (expected for container environments)")
 
@@ -1770,19 +2072,46 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
         container_id = None
         try:
             run_result = subprocess.run(
-                ["docker", "run", "-d", "--rm", "-p", "18080:8080", image_tag],
+                ["docker", "run", "-d", "--rm", "-p", "127.0.0.1::8000", image_tag],
                 capture_output=True, text=True, timeout=30,
             )
             if run_result.returncode != 0:
                 errors.append(f"Failed to start container: {run_result.stderr}")
             else:
                 container_id = run_result.stdout.strip()
-                time.sleep(3)
+                port_result = subprocess.run(
+                    [
+                        "docker",
+                        "inspect",
+                        "--format",
+                        '{{(index (index .NetworkSettings.Ports "8000/tcp") 0).HostPort}}',
+                        container_id,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if port_result.returncode != 0 or not port_result.stdout.strip().isdigit():
+                    raise RuntimeError("could not resolve the container health port")
+                base_url = f"http://127.0.0.1:{port_result.stdout.strip()}"
+
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        with urllib.request.urlopen(f"{base_url}/health", timeout=1):
+                            break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("environment did not become healthy within 30 seconds")
+                        time.sleep(0.25)
 
                 try:
+                    reset_payload = json.dumps(
+                        {"task_id": json.loads((target / "tasks.json").read_text())[0]["task_id"], "seed": 42}
+                    ).encode()
                     req = urllib.request.Request(
-                        "http://localhost:18080/reset",
-                        data=b"{}",
+                        f"{base_url}/reset",
+                        data=reset_payload,
                         headers={"Content-Type": "application/json"},
                         method="POST",
                     )
@@ -1792,19 +2121,32 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
                             errors.append("POST /reset response missing 'observation' field")
                         else:
                             passed.append("POST /reset returns valid response with 'observation'")
+                    repeat_req = urllib.request.Request(
+                        f"{base_url}/reset",
+                        data=reset_payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(repeat_req, timeout=10) as resp:
+                        if json.loads(resp.read()) != reset_body:
+                            errors.append("POST /reset is not deterministic for the same task and seed")
+                        else:
+                            passed.append("POST /reset is deterministic")
                 except Exception as e:
                     errors.append(f"POST /reset failed: {e}")
 
                 try:
                     req = urllib.request.Request(
-                        "http://localhost:18080/step",
-                        data=json.dumps({"action": "test_action"}).encode(),
+                        f"{base_url}/step",
+                        data=json.dumps(
+                            {"action": {"content": "hello epsilab", "action_type": "submit"}}
+                        ).encode(),
                         headers={"Content-Type": "application/json"},
                         method="POST",
                     )
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         step_body = json.loads(resp.read())
-                        required = {"observation", "reward", "terminated", "truncated"}
+                        required = {"observation", "reward", "done"}
                         missing = required - set(step_body.keys())
                         if missing:
                             errors.append(f"POST /step response missing fields: {missing}")
@@ -1813,12 +2155,8 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
                         if "reward" in step_body:
                             if not isinstance(step_body["reward"], (int, float)):
                                 errors.append(f"reward must be numeric, got {type(step_body['reward']).__name__}")
-                        if "terminated" in step_body:
-                            if not isinstance(step_body["terminated"], bool):
-                                errors.append(f"terminated must be bool, got {type(step_body['terminated']).__name__}")
-                        if "truncated" in step_body:
-                            if not isinstance(step_body["truncated"], bool):
-                                errors.append(f"truncated must be bool, got {type(step_body['truncated']).__name__}")
+                        if "done" in step_body and not isinstance(step_body["done"], bool):
+                            errors.append(f"done must be bool, got {type(step_body['done']).__name__}")
                 except Exception as e:
                     errors.append(f"POST /step failed: {e}")
 
@@ -1894,6 +2232,8 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
 
 
 def cmd_env_init(args: argparse.Namespace) -> None:
+    import re
+
     slug = args.slug
     target_dir = args.directory
 
@@ -1903,7 +2243,10 @@ def cmd_env_init(args: argparse.Namespace) -> None:
         if not target_dir:
             target_dir = text("Project directory", default=slug)
 
-    slug = slug or "my-environment"
+    raw_slug = slug or "my-environment"
+    slug = re.sub(r"[^a-z0-9]+", "-", raw_slug.lower()).strip("-")
+    if len(slug) < 3 or len(slug) > 64:
+        _err("Environment name must produce a 3-64 character slug.")
     target = Path(target_dir or slug)
 
     if target.exists() and any(target.iterdir()):
@@ -1916,18 +2259,40 @@ def cmd_env_init(args: argparse.Namespace) -> None:
     target.mkdir(parents=True, exist_ok=True)
 
     (target / "Dockerfile").write_text(_DOCKERFILE_TEMPLATE)
+    (target / "environment.py").write_text(
+        _ENVIRONMENT_TEMPLATE.replace("__SLUG__", slug)
+    )
     (target / "server.py").write_text(_SERVER_TEMPLATE)
+    (target / "verifier.py").write_text(_VERIFIER_TEMPLATE)
     (target / "tasks.json").write_text(_TASKS_TEMPLATE % {"slug": slug})
-    (target / "requirements.txt").write_text("")
+    (target / "requirements.txt").write_text(_REQUIREMENTS_TEMPLATE)
+    (target / ".dockerignore").write_text(
+        ".git\n.epsilab\n__pycache__\n*.py[cod]\n.pytest_cache\n"
+    )
+    _save_project(
+        target,
+        {
+            "type": "environment",
+            "name": slug,
+            "slug": slug,
+            "title": slug.replace("-", " ").title(),
+            "summary": "A deterministic OpenEnv environment.",
+            "version": "1.0.0",
+            "visibility": "public",
+            "namespace_id": "",
+            "listing_id": "",
+        },
+    )
 
     _ok(f"\nInitialized environment project in {target}/")
     _ok("")
-    _ok(f"  {target}/Dockerfile     — container image template")
-    _ok(f"  {target}/server.py      — minimal environment server (POST /reset, POST /step)")
+    _ok(f"  {target}/environment.py — environment logic")
+    _ok(f"  {target}/verifier.py    — deterministic trajectory verifier")
     _ok(f"  {target}/tasks.json     — task definitions")
+    _ok(f"  {target}/Dockerfile     — production container")
     _ok("")
     _ok("Next steps:")
-    _ok("  1. Implement your environment logic in server.py")
+    _ok("  1. Implement your environment logic in environment.py")
     _ok("  2. Add your tasks to tasks.json")
     _ok(f"  3. Deploy:  cd {target} && epsilab deploy")
     _ok("")
@@ -2030,7 +2395,7 @@ def cmd_env_session_step(args: argparse.Namespace) -> None:
             _ok(f"  info:    {json.dumps(result.info, default=str)[:200]}")
         if result.terminated or result.truncated:
             _ok("")
-            _ok(f"Session complete.")
+            _ok("Session complete.")
         if args.json:
             _json_out({"observation": result.observation, "reward": result.reward,
                         "terminated": result.terminated, "truncated": result.truncated,
@@ -2086,6 +2451,244 @@ def cmd_env_session_cancel(args: argparse.Namespace) -> None:
         _err(_friendly_error(e))
     finally:
         client.close()
+
+
+def _resolve_environment_listing(client: EpsilabClient, target: str) -> Any:
+    """Resolve an owner/name reference to one deployed environment listing."""
+    if target.count("/") != 1:
+        raise ValueError("Environment must be written as <owner>/<name>.")
+    owner, slug = (part.strip().lower() for part in target.split("/", 1))
+    if not owner or not slug:
+        raise ValueError("Environment must be written as <owner>/<name>.")
+
+    listings = client.list_environment_listings(limit=100)
+    exact = [
+        listing
+        for listing in listings
+        if listing.slug.lower() == slug
+        and (listing.namespace or "").lower() == owner
+    ]
+    if not exact:
+        slug_matches = [
+            listing
+            for listing in listings
+            if listing.slug.lower() == slug and not listing.namespace
+        ]
+        if len(slug_matches) == 1:
+            exact = slug_matches
+    if not exact:
+        raise ValueError(f"Environment '{target}' was not found.")
+    if len(exact) > 1:
+        raise ValueError(f"Environment '{target}' is ambiguous; use its exact owner/name.")
+
+    listing = exact[0]
+    if not listing.deployment_id:
+        raise ValueError(f"Environment '{target}' does not have an active deployment.")
+    return listing
+
+
+def _resolve_environment_task(
+    client: EpsilabClient,
+    *,
+    slug: str,
+    explicit_task_id: str | None,
+) -> str:
+    """Resolve a task for a listing without inventing arbitrary UUIDs."""
+    if explicit_task_id:
+        return explicit_task_id
+
+    candidates: list[str] = []
+    try:
+        for task in client.iter_tasks(source="custom", page_size=100):
+            task_id = task.get("task_id")
+            if isinstance(task_id, str) and task_id.startswith(f"{slug}-"):
+                candidates.append(task_id)
+    except EpsilabError:
+        _cli_logger.debug("Task discovery failed for %s", slug, exc_info=True)
+    if candidates:
+        return sorted(
+            set(candidates),
+            key=lambda task_id: ("-train-" not in task_id, task_id),
+        )[0]
+    return f"{slug}-easy-train-001"
+
+
+def _encode_environment_action(value: str, *, action_type: str) -> str:
+    """Encode plain text or validate an explicitly structured action."""
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("Action cannot be empty.")
+    if stripped.startswith("{"):
+        try:
+            decoded = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Structured action is not valid JSON: {exc.msg}.") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError("Structured action must be a JSON object.")
+        return json.dumps(decoded, separators=(",", ":"), sort_keys=True)
+    return json.dumps(
+        {"content": value, "action_type": action_type},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _interactive_action(raw: str, default_type: str) -> tuple[str, str]:
+    """Parse optional action types used by the terminal loop."""
+    stripped = raw.strip()
+    if not stripped.startswith("/"):
+        return raw, default_type
+    command, _, content = stripped[1:].partition(" ")
+    if command not in {"analyze", "respond", "submit", "test"}:
+        raise ValueError(
+            "Unknown action type. Use /analyze, /respond, /test, /submit, or /quit."
+        )
+    if not content.strip():
+        raise ValueError(f"/{command} requires action content.")
+    return content, command
+
+
+def _public_step_info(info_data: Any) -> dict[str, Any]:
+    """Return customer-relevant verification fields only."""
+    if not isinstance(info_data, dict):
+        return {}
+    allowed = {
+        "passed",
+        "score",
+        "terminal_reason",
+        "tests_passed",
+        "tests_total",
+        "verification_evidence_digest",
+        "verification_status",
+    }
+    return {key: info_data[key] for key in sorted(allowed & info_data.keys())}
+
+
+def _display_environment_observation(label: str, observation: str | None) -> None:
+    value = observation if observation not in {None, ""} else "(no observation)"
+    _ok(f"\n{label}:\n{value}")
+
+
+def _display_environment_step(result: Any) -> None:
+    _display_environment_observation("Observation", result.observation)
+    reward = "pending" if result.reward is None else f"{result.reward:.4f}"
+    state = "terminated" if result.terminated else "truncated" if result.truncated else "active"
+    _ok(f"\nReward: {reward}")
+    _ok(f"Status: {state}")
+    verification = _public_step_info(result.info)
+    if verification:
+        _ok("Verification:")
+        for key, value in verification.items():
+            _ok(f"  {key}: {value}")
+
+
+def cmd_run_environment(args: argparse.Namespace) -> None:
+    """Run one hosted environment by its public owner/name reference."""
+    client = _get_client()
+    session = None
+    terminal = False
+    interrupted = False
+    try:
+        listing = _resolve_environment_listing(client, args.target)
+        task_id = _resolve_environment_task(
+            client,
+            slug=listing.slug,
+            explicit_task_id=args.task,
+        )
+        owner = listing.namespace or args.target.split("/", 1)[0]
+        canonical_name = f"{owner}/{listing.slug}"
+
+        if not args.json:
+            _ok(f"Starting {canonical_name}")
+            _ok(f"Task: {task_id}")
+        session = client.create_environment_session(
+            listing.deployment_id,
+            task_id=task_id,
+            seed=args.seed,
+        )
+        session_token = session.session_token
+        session = client.wait_for_session(session, timeout=args.timeout)
+        if session.session_token is None:
+            session.session_token = session_token
+        if session.is_terminal:
+            terminal = True
+            raise RuntimeError(
+                f"Session ended during startup ({session.status}: "
+                f"{session.terminal_reason or 'no reason provided'})."
+            )
+        if not session.is_active:
+            raise RuntimeError(f"Session entered unexpected state '{session.status}'.")
+
+        if not args.json:
+            _ok(f"Session: {session.session_id}")
+            _display_environment_observation("Observation", session.observation)
+
+        results: list[dict[str, Any]] = []
+
+        def take_action(raw_action: str, action_type: str) -> bool:
+            nonlocal terminal
+            encoded = _encode_environment_action(raw_action, action_type=action_type)
+            result = client.environment_step(
+                session.session_id,
+                encoded,
+                session_token=session.session_token,
+            )
+            public_result = result.to_dict()
+            public_result["info"] = _public_step_info(result.info)
+            results.append(public_result)
+            terminal = result.done
+            if not args.json:
+                _display_environment_step(result)
+            return result.done
+
+        if args.action is not None:
+            take_action(args.action, args.action_type)
+        else:
+            if args.json:
+                raise ValueError("--json requires --action for non-interactive output.")
+            _ok("\nEnter an action. Prefix with /analyze, /test, /respond, or /submit; /quit exits.")
+            while not terminal:
+                try:
+                    raw_action = input("action> ")
+                except EOFError:
+                    break
+                if raw_action.strip().lower() in {"/quit", "quit", "exit"}:
+                    break
+                try:
+                    content, action_type = _interactive_action(raw_action, args.action_type)
+                    take_action(content, action_type)
+                except ValueError as exc:
+                    _ok(f"Invalid action: {exc}")
+
+        if args.json:
+            _json_out(
+                {
+                    "environment": canonical_name,
+                    "task_id": task_id,
+                    "session_id": session.session_id,
+                    "results": results,
+                }
+            )
+    except KeyboardInterrupt:
+        interrupted = True
+        _ok("\nInterrupted.")
+    except (EpsilabError, TimeoutError, RuntimeError, ValueError) as exc:
+        _err(_friendly_error(exc))
+    finally:
+        if session is not None and not terminal:
+            try:
+                client.cancel_environment_session(session.session_id)
+                if not args.json:
+                    _ok("Session closed.")
+            except EpsilabError:
+                _cli_logger.warning(
+                    "Could not close environment session %s",
+                    session.session_id,
+                    exc_info=True,
+                )
+        client.close()
+        if interrupted:
+            return
 
 
 def cmd_env_publish(args: argparse.Namespace) -> None:
@@ -2684,7 +3287,7 @@ def cmd_rl_step(args: argparse.Namespace) -> None:
 
         if result.terminated or result.truncated:
             _ok("")
-            _ok(f"Session complete. View trajectory:")
+            _ok("Session complete. View trajectory:")
             _ok(f"  epsilab rl trajectory {args.session_id}")
         if args.json:
             _json_out({"observation": result.observation, "reward": result.reward,
@@ -2943,6 +3546,16 @@ def build_parser() -> argparse.ArgumentParser:
     whoami_p = sub.add_parser("whoami", help="Show current authentication status")
     whoami_p.set_defaults(func=cmd_whoami)
 
+    # ── init (top-level) ────────────────────────────────────────
+    root_init_p = sub.add_parser(
+        "init",
+        help="Scaffold a new environment project",
+        description="Create a deterministic OpenEnv project that is ready to build and deploy.",
+    )
+    root_init_p.add_argument("slug", nargs="?", help="Environment name (default: my-environment)")
+    root_init_p.add_argument("-d", "--directory", help="Target directory")
+    root_init_p.set_defaults(func=cmd_env_init)
+
     # ── deploy (top-level) ──────────────────────────────────────
     deploy_p = sub.add_parser(
         "deploy",
@@ -2956,14 +3569,26 @@ def build_parser() -> argparse.ArgumentParser:
             "config to .epsilab/project.json. Subsequent runs reuse it.\n\n"
             "  epsilab deploy              # deploy current directory\n"
             "  epsilab deploy ./my-env     # deploy a specific directory\n"
-            "  epsilab deploy --prod       # deploy and make live\n"
+            "  epsilab deploy              # deploy and make live\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     deploy_p.add_argument("directory", nargs="?", default=".", help="Environment directory (default: .)")
     deploy_p.add_argument("--version", help="Release version (default: 0.1.0)")
     deploy_p.add_argument("--namespace-id", help="Namespace ID (skips namespace selection)")
-    deploy_p.add_argument("--prod", action="store_true", help="Deploy for hosted execution after pushing")
+    deploy_p.add_argument(
+        "--prod",
+        dest="prod",
+        action="store_true",
+        default=True,
+        help="Deploy for hosted execution (default)",
+    )
+    deploy_p.add_argument(
+        "--no-host",
+        dest="prod",
+        action="store_false",
+        help="Register the release without creating a hosted deployment",
+    )
     deploy_p.add_argument("--yes", "-y", action="store_true", help="Skip prompts (use defaults)")
     deploy_p.set_defaults(func=cmd_deploy)
 
@@ -3204,8 +3829,41 @@ def build_parser() -> argparse.ArgumentParser:
     purchase_p.set_defaults(func=cmd_env_purchase)
 
     # ── run ──────────────────────────────────────────────────────
-    run_p = sub.add_parser("run", help="Manage evaluation runs")
-    run_sub = run_p.add_subparsers(dest="run_command", help="Run commands")
+    run_p = sub.add_parser(
+        "run",
+        help="Run an environment or manage evaluation runs",
+        description=(
+            "Run a hosted environment by owner/name, or use an evaluation-run subcommand.\n\n"
+            "  epsilab run epsilab/bug-hunter\n"
+            "  epsilab run epsilab/bug-hunter --action '<answer>'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    run_sub = run_p.add_subparsers(
+        dest="run_command",
+        help="Run commands",
+        metavar="{create,list,show,cancel,export,eval}",
+    )
+
+    run_environment_p = run_sub.add_parser("__environment", prog="epsilab run")
+    run_environment_p.add_argument("target", help="Environment as <owner>/<name>")
+    run_environment_p.add_argument("--action", help="Take one action and exit")
+    run_environment_p.add_argument(
+        "--action-type",
+        choices=["analyze", "respond", "submit", "test"],
+        default="submit",
+        help="Action type for plain-text input (default: submit)",
+    )
+    run_environment_p.add_argument("--task", help="Task ID (default: first train task)")
+    run_environment_p.add_argument("--seed", type=int, default=42, help="Episode seed")
+    run_environment_p.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="Seconds to wait for session readiness (default: 120)",
+    )
+    run_environment_p.add_argument("--json", action="store_true", help="Output one-step result as JSON")
+    run_environment_p.set_defaults(func=cmd_run_environment)
 
     run_create_p = run_sub.add_parser("create", help="Create a single-model evaluation run")
     run_create_p.add_argument("model", nargs="?", help="Model name (e.g. gpt-4)")
@@ -3372,9 +4030,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _normalize_cli_argv(argv: List[str]) -> List[str]:
+    """Map the public environment-run syntax onto the existing run group."""
+    normalized = list(argv)
+    index = 0
+    while index < len(normalized):
+        token = normalized[index]
+        if token in {"--profile", "-p"}:
+            index += 2
+            continue
+        if token in {"--verbose", "-v"}:
+            index += 1
+            continue
+        if token == "run":
+            next_index = index + 1
+            if (
+                next_index < len(normalized)
+                and "/" in normalized[next_index]
+                and not normalized[next_index].startswith("-")
+            ):
+                normalized.insert(next_index, "__environment")
+            break
+        break
+    return normalized
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    parsed_argv = _normalize_cli_argv(list(argv) if argv is not None else sys.argv[1:])
+    args = parser.parse_args(parsed_argv)
 
     if getattr(args, "verbose", False):
         logging.basicConfig(

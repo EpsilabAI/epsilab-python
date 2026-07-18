@@ -30,32 +30,11 @@ from pathlib import Path
 
 from epsilab import Epsilab
 
-
-# ── Environment discovery ────────────────────────────────────────
-
-
-def resolve_environments(client: Epsilab, env_spec: str) -> list[dict]:
-    """Resolve --envs into a list of {slug, deployment_id} dicts."""
-    listings = client.list_environment_listings(limit=200)
-    available = [l for l in listings if l.deployment_id]
-
-    if env_spec == "all":
-        return [{"slug": l.slug, "deployment_id": l.deployment_id} for l in available]
-
-    slugs = [s.strip() for s in env_spec.split(",") if s.strip()]
-    available_map = {l.slug: l for l in available}
-    resolved = []
-    for slug in slugs:
-        if slug not in available_map:
-            avail = sorted(available_map.keys())[:15]
-            raise SystemExit(
-                f"Environment '{slug}' not found or has no deployment.\n"
-                f"Available: {', '.join(avail)}"
-            )
-        l = available_map[slug]
-        resolved.append({"slug": l.slug, "deployment_id": l.deployment_id})
-    return resolved
-
+from _environment_utils import (
+    resolve_environments,
+    submission,
+    task_ids_for_environment,
+)
 
 # ── Data collection ──────────────────────────────────────────────
 
@@ -71,7 +50,7 @@ def collect_training_data(
     for env in environments:
         slug = env["slug"]
         dep_id = env["deployment_id"]
-        task_ids = [f"{slug}-train-easy-{str(i).zfill(3)}" for i in range(1, sessions_per_env + 1)]
+        task_ids = task_ids_for_environment(client, slug, limit=sessions_per_env)
         print(f"\n  [{slug}] running {len(task_ids)} sessions ...")
 
         for task_id in task_ids:
@@ -86,7 +65,8 @@ def collect_training_data(
                     f"My solution addresses each requirement systematically."
                 )
                 result = client.environment_step(
-                    session.session_id, response,
+                    session.session_id,
+                    submission(response),
                     session_token=session.session_token,
                 )
                 records.append({
@@ -428,7 +408,7 @@ def main():
     print(f"   Saved to {data_path}")
 
     if args.collect_only:
-        print(f"\n   --collect-only: skipping fine-tuning")
+        print("\n   --collect-only: skipping fine-tuning")
         client.close()
         return
 

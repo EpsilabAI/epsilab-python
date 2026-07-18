@@ -2662,17 +2662,22 @@ class EpsilabClient:
         import time as _time
 
         deadline = _time.monotonic() + timeout
+        session_token = session.session_token
+        token_expires_at = session.session_token_expires_at
         while session.status == "provisioning":
             if _time.monotonic() > deadline:
                 raise TimeoutError(f"Session {session.session_id} did not become active within {timeout}s")
             _time.sleep(poll_interval)
             session = self.get_environment_session(session.session_id)
+            if session.session_token is None:
+                session.session_token = session_token
+                session.session_token_expires_at = token_expires_at
         return session
 
     def environment_step(
         self,
         session_id: str,
-        action: str,
+        action: Union[str, Dict[str, Any]],
         *,
         session_token: Optional[str] = None,
         idempotency_key: Optional[str] = None,
@@ -2684,7 +2689,8 @@ class EpsilabClient:
 
         Args:
             session_id: Session to step.
-            action: Action string (format depends on environment).
+            action: Action string or structured action object. Structured actions
+                are serialized deterministically for the hosted runtime.
             session_token: Session-scoped bearer token. If not provided,
                 the default API key authorization is used.
             idempotency_key: Unique key for at-most-once delivery.
@@ -2698,10 +2704,20 @@ class EpsilabClient:
         }
         if session_token:
             extra_headers["X-RL-Session-Token"] = session_token
+        if isinstance(action, dict):
+            serialized_action = json.dumps(
+                action,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        elif isinstance(action, str):
+            serialized_action = action
+        else:
+            raise TypeError("action must be a string or dictionary")
         data = self._request(
             "POST",
             f"/v1/environment-sessions/{self._path_segment(session_id)}/step",
-            json_body={"action": action},
+            json_body={"action": serialized_action},
             extra_headers=extra_headers,
         )
         return EnvironmentStepResult.from_dict(data)

@@ -29,25 +29,11 @@ from pathlib import Path
 
 from epsilab import Epsilab
 
-
-def resolve_environments(client: Epsilab, env_spec: str) -> list[dict]:
-    """Resolve --envs into a list of {slug, deployment_id} dicts."""
-    listings = client.list_environment_listings(limit=200)
-    available = [l for l in listings if l.deployment_id]
-
-    if env_spec == "all":
-        return [{"slug": l.slug, "deployment_id": l.deployment_id} for l in available]
-
-    slugs = [s.strip() for s in env_spec.split(",") if s.strip()]
-    available_map = {l.slug: l for l in available}
-    resolved = []
-    for slug in slugs:
-        if slug not in available_map:
-            avail = sorted(available_map.keys())[:15]
-            raise SystemExit(f"Environment '{slug}' not found.\nAvailable: {', '.join(avail)}")
-        l = available_map[slug]
-        resolved.append({"slug": l.slug, "deployment_id": l.deployment_id})
-    return resolved
+from _environment_utils import (
+    resolve_environments,
+    submission,
+    task_ids_for_environment,
+)
 
 
 def evaluate_sequential(
@@ -62,7 +48,7 @@ def evaluate_sequential(
     for env in environments:
         slug = env["slug"]
         dep_id = env["deployment_id"]
-        task_ids = [f"{slug}-train-easy-{str(i).zfill(3)}" for i in range(1, tasks_per_env + 1)]
+        task_ids = task_ids_for_environment(client, slug, limit=tasks_per_env)
         print(f"\n  [{slug}] evaluating {len(task_ids)} tasks ...")
 
         for task_id in task_ids:
@@ -71,7 +57,9 @@ def evaluate_sequential(
                 session = client.wait_for_session(session)
                 action = model_fn(session.observation)
                 result = client.environment_step(
-                    session.session_id, action, session_token=session.session_token,
+                    session.session_id,
+                    submission(action),
+                    session_token=session.session_token,
                 )
                 results.append({
                     "env": slug,
@@ -98,8 +86,8 @@ def evaluate_batch(
         slug = env["slug"]
         dep_id = env["deployment_id"]
         task_seed_pairs = [
-            {"task_id": f"{slug}-train-easy-{str(i).zfill(3)}", "seed": seed}
-            for i in range(1, tasks_per_env + 1)
+            {"task_id": task_id, "seed": seed}
+            for task_id in task_ids_for_environment(client, slug, limit=tasks_per_env)
         ]
         print(f"\n  [{slug}] submitting batch of {len(task_seed_pairs)} tasks ...")
 

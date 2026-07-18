@@ -15,7 +15,10 @@ import pytest
 
 from epsilab.cli import (
     _active_profile,
+    _encode_environment_action,
     _get_client,
+    _normalize_cli_argv,
+    _public_step_info,
     _load_config,
     _resolve_api_key,
     _save_config,
@@ -66,6 +69,21 @@ class TestParser:
     def test_login_with_label(self):
         args = build_parser().parse_args(["login", "--api-key", "sk-test", "--label", "production"])
         assert args.label == "production"
+
+    def test_root_init_command(self):
+        args = build_parser().parse_args(["init", "my-environment"])
+        assert args.command == "init"
+        assert args.slug == "my-environment"
+
+    def test_public_run_syntax_is_normalized_without_affecting_run_subcommands(self):
+        assert _normalize_cli_argv(["run", "epsilab/bug-hunter", "--action", "x"]) == [
+            "run",
+            "__environment",
+            "epsilab/bug-hunter",
+            "--action",
+            "x",
+        ]
+        assert _normalize_cli_argv(["run", "list"]) == ["run", "list"]
 
     def test_env_list_command(self):
         args = build_parser().parse_args(["env", "list", "--limit", "10"])
@@ -167,12 +185,19 @@ class TestEnvInit:
 
         assert (target / "tasks.json").exists()
         assert (target / "Dockerfile").exists()
+        assert (target / "environment.py").exists()
         assert (target / "server.py").exists()
+        assert (target / "verifier.py").exists()
         assert (target / "requirements.txt").exists()
+        assert (target / ".epsilab" / "project.json").exists()
 
         tasks = json.loads((target / "tasks.json").read_text())
         assert isinstance(tasks, list)
-        assert tasks[0]["task_id"] == "test-env-001"
+        assert tasks[0]["task_id"] == "test-env-easy-train-001"
+        project = json.loads((target / ".epsilab" / "project.json").read_text())
+        assert project["listing_id"] == ""
+        assert project["namespace_id"] == ""
+        assert project["version"] == "1.0.0"
 
     def test_refuses_nonempty_dir(self, tmp_path):
         target = tmp_path / "existing"
@@ -1078,16 +1103,17 @@ class TestEnvInitDefaultSlug:
 
         tasks = json.loads((target / "tasks.json").read_text())
         assert isinstance(tasks, list)
-        assert tasks[0]["task_id"] == "my-environment-001"
+        assert tasks[0]["task_id"] == "my-environment-easy-train-001"
 
-    def test_server_py_is_valid_python(self, tmp_path):
+    def test_generated_python_files_are_valid(self, tmp_path):
         target = tmp_path / "valid-env"
         args = build_parser().parse_args(["env", "init", "valid-env"])
         args.directory = str(target)
         cmd_env_init(args)
 
-        server_code = (target / "server.py").read_text()
-        compile(server_code, "server.py", "exec")
+        for filename in ("environment.py", "server.py", "verifier.py"):
+            source = (target / filename).read_text()
+            compile(source, filename, "exec")
 
     def test_tasks_json_is_valid(self, tmp_path):
         target = tmp_path / "json-env"
@@ -1100,6 +1126,253 @@ class TestEnvInitDefaultSlug:
         assert len(tasks) >= 1
         assert "task_id" in tasks[0]
         assert "prompt" in tasks[0]
+
+
+class TestEnvironmentRunHelpers:
+    def test_plain_action_uses_selected_type(self):
+        encoded = json.loads(_encode_environment_action("inspect this", action_type="analyze"))
+        assert encoded == {"action_type": "analyze", "content": "inspect this"}
+
+    def test_structured_action_is_preserved(self):
+        encoded = _encode_environment_action(
+            '{"tool":"search","input":{"q":"status"}}',
+            action_type="submit",
+        )
+        assert json.loads(encoded) == {"tool": "search", "input": {"q": "status"}}
+
+    def test_invalid_structured_action_is_rejected(self):
+        with pytest.raises(ValueError, match="not valid JSON"):
+            _encode_environment_action("{bad", action_type="submit")
+
+    def test_step_info_excludes_internal_fields(self):
+        assert _public_step_info(
+            {
+                "passed": True,
+                "verification_status": "verified",
+                "provider_key": "internal",
+                "runtime_config": {"secret": True},
+            }
+        ) == {"passed": True, "verification_status": "verified"}
+
+
+class TestRunEnvironmentCommand:
+    def test_one_step_flow_resolves_listing_task_and_uses_session_token(self, capsys):
+        captured = {}
+
+        def handler(req):
+            if req.method == "GET" and req.url.path == "/v1/environment-listings":
+                return _json_response(
+                    [
+                        {
+                            "listing_id": "lst-1",
+                            "namespace_id": "ns-1",
+                            "namespace": "epsilab",
+                            "slug": "bug-hunter",
+                            "title": "Bug Hunter",
+                            "deployment_id": "dep-1",
+                        }
+                    ]
+                )
+            if req.method == "GET" and req.url.path == "/v1/tasks":
+                return _json_response(
+                    {"tasks": [{"task_id": "bug-hunter-easy-train-001"}]}
+                )
+            if req.method == "POST" and req.url.path.endswith("/sessions"):
+                return _json_response(
+                    {
+                        "session_id": "sess-1",
+                        "task_id": "bug-hunter-easy-train-001",
+                        "status": "active",
+                        "session_token": "session-secret",
+                        "observation": "Find and fix the bug.",
+                    },
+                    status=202,
+                )
+            if req.method == "POST" and req.url.path.endswith("/step"):
+                captured["token"] = req.headers.get("x-rl-session-token")
+                captured["action"] = json.loads(req.content)["action"]
+                return _json_response(
+                    {
+                        "observation": "Submission received.",
+                        "reward": 1.0,
+                        "terminated": True,
+                        "truncated": False,
+                        "info": {
+                            "passed": True,
+                            "verification_status": "verified",
+                            "provider_key": "not-public",
+                        },
+                    }
+                )
+            raise AssertionError(f"unexpected request: {req.method} {req.url.path}")
+
+        client = _mock_client(handler)
+        with patch("epsilab.cli._get_client", return_value=client):
+            main(
+                [
+                    "run",
+                    "epsilab/bug-hunter",
+                    "--action",
+                    "fixed code",
+                    "--task",
+                    "bug-hunter-easy-train-001",
+                ]
+            )
+
+        assert captured["token"] == "session-secret"
+        assert json.loads(captured["action"]) == {
+            "action_type": "submit",
+            "content": "fixed code",
+        }
+        output = capsys.readouterr().out
+        assert "Reward: 1.0000" in output
+        assert "verification_status: verified" in output
+        assert "not-public" not in output
+
+    def test_nonterminal_one_step_session_is_cancelled(self):
+        cancelled = []
+
+        def handler(req):
+            if req.method == "GET" and req.url.path == "/v1/environment-listings":
+                return _json_response(
+                    [
+                        {
+                            "listing_id": "lst-1",
+                            "namespace_id": "ns-1",
+                            "namespace": "epsilab",
+                            "slug": "workflow",
+                            "title": "Workflow",
+                            "deployment_id": "dep-1",
+                        }
+                    ]
+                )
+            if req.method == "POST" and req.url.path.endswith("/sessions"):
+                return _json_response(
+                    {
+                        "session_id": "sess-2",
+                        "task_id": "workflow-task",
+                        "status": "active",
+                        "session_token": "token",
+                        "observation": "Ready.",
+                    },
+                    status=202,
+                )
+            if req.method == "POST" and req.url.path.endswith("/step"):
+                return _json_response(
+                    {
+                        "observation": "Continue.",
+                        "reward": None,
+                        "terminated": False,
+                        "truncated": False,
+                        "info": {},
+                    }
+                )
+            if req.method == "POST" and req.url.path.endswith("/cancel"):
+                cancelled.append(req.url.path)
+                return _json_response({"session_id": "sess-2", "status": "cancelled"})
+            raise AssertionError(f"unexpected request: {req.method} {req.url.path}")
+
+        client = _mock_client(handler)
+        with patch("epsilab.cli._get_client", return_value=client):
+            main(
+                [
+                    "run",
+                    "epsilab/workflow",
+                    "--task",
+                    "workflow-task",
+                    "--action",
+                    "inspect",
+                    "--action-type",
+                    "analyze",
+                ]
+            )
+
+        assert cancelled == ["/v1/environment-sessions/sess-2/cancel"]
+
+
+class TestRootDeployCommand:
+    def test_repairs_empty_project_ids_and_creates_openenv_deployment(
+        self,
+        tmp_path,
+        capsys,
+    ):
+        target = tmp_path / "demo-env"
+        init_args = build_parser().parse_args(["init", "demo-env", "-d", str(target)])
+        cmd_env_init(init_args)
+        captured = {"paths": [], "environment_body": None}
+
+        existing_listing = {
+            "listing_id": "lst-existing",
+            "namespace_id": "ns-1",
+            "namespace": "epsilab",
+            "slug": "existing",
+            "title": "Existing",
+            "is_owner": True,
+        }
+        deployed_listing = {
+            "listing_id": "lst-new",
+            "namespace_id": "ns-1",
+            "namespace": "epsilab",
+            "slug": "demo-env",
+            "title": "Demo Env",
+            "is_owner": True,
+            "release_id": "rel-1",
+            "release_version": "1.0.0",
+            "deployment_id": "dep-1",
+        }
+
+        def handler(req):
+            captured["paths"].append((req.method, req.url.path))
+            if req.method == "GET" and req.url.path == "/v1/environment-listings":
+                return _json_response([existing_listing])
+            if req.method == "GET" and req.url.path == "/v1/application-tools":
+                return _json_response([])
+            if req.method == "POST" and req.url.path == "/v1/environment-listings":
+                return _json_response(deployed_listing, status=201)
+            if req.method == "POST" and req.url.path == "/v1/tasks":
+                return _json_response({"task_id": "demo-env-easy-train-001"}, status=201)
+            if req.method == "POST" and req.url.path == "/v1/task-pack-releases":
+                return _json_response({"release_id": "pack-1"}, status=201)
+            if req.method == "POST" and req.url.path == "/v1/verifier-releases":
+                return _json_response({"release_id": "ver-1"}, status=201)
+            if req.method == "POST" and req.url.path == "/v1/environment-releases":
+                captured["environment_body"] = json.loads(req.content)
+                return _json_response(
+                    {
+                        "release_id": "rel-1",
+                        "listing_id": "lst-new",
+                        "release_version": "1.0.0",
+                        "protocol_version": "0.4.1",
+                        "status": "qualified",
+                    },
+                    status=201,
+                )
+            if req.method == "POST" and req.url.path == "/v1/environment-deployments":
+                return _json_response({"deployment_id": "dep-1"}, status=201)
+            if req.method == "GET" and req.url.path == "/v1/environment-listings/lst-new":
+                return _json_response(deployed_listing)
+            raise AssertionError(f"unexpected request: {req.method} {req.url.path}")
+
+        client = _mock_client(handler)
+        upload = {
+            "image_ref": "registry.example/demo-env@sha256:" + "a" * 64,
+            "content_digest": "sha256:" + "a" * 64,
+        }
+        with (
+            patch("epsilab.cli._get_client", return_value=client),
+            patch("epsilab.cli._docker_build_and_upload", return_value=upload),
+        ):
+            main(["deploy", str(target), "--yes"])
+
+        project = json.loads((target / ".epsilab" / "project.json").read_text())
+        assert project["namespace_id"] == "ns-1"
+        assert project["listing_id"] == "lst-new"
+        assert project["deployment_id"] == "dep-1"
+        assert captured["environment_body"]["resource_policy"]["runtime_interface"] == "openenv"
+        assert ("POST", "/v1/environment-deployments") in captured["paths"]
+        output = capsys.readouterr().out
+        assert "Deployed demo-env@1.0.0" in output
+        assert "epsilab run epsilab/demo-env" in output
 
 
 class TestEnvVerify:

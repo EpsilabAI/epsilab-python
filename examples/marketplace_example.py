@@ -18,6 +18,8 @@ import argparse
 
 from epsilab import Epsilab
 
+from _environment_utils import submission, task_ids_for_environment
+
 
 def consumer_workflow(client: Epsilab) -> None:
     """Browse the hub, run a session, and inspect listings."""
@@ -25,33 +27,33 @@ def consumer_workflow(client: Epsilab) -> None:
     # ── Browse the catalog ───────────────────────────────────────
     print("\n-- Environment Hub --")
     listings = client.list_environment_listings(limit=10)
-    deployed = [l for l in listings if l.deployment_id]
+    deployed = [listing for listing in listings if listing.deployment_id]
     print(f"  {len(deployed)} deployed environments:")
-    for l in deployed[:5]:
-        stars = f"  [{l.star_count} stars]" if hasattr(l, "star_count") and l.star_count else ""
-        print(f"    {l.slug:30s}  {l.title}{stars}")
+    for listing in deployed[:5]:
+        stars = f"  [{listing.star_count} stars]" if listing.star_count else ""
+        print(f"    {listing.slug:30s}  {listing.title}{stars}")
 
     # ── Application tools ────────────────────────────────────────
     print("\n-- Application Tools --")
     tools = client.list_application_tools(limit=5)
     print(f"  {len(tools)} tools:")
     for t in tools[:5]:
-        name = t.get("name") or t.get("slug", "?")
-        print(f"    {name}")
+        print(f"    {t.slug}")
 
     # ── Run a quick session ──────────────────────────────────────
     if deployed:
         listing = deployed[0]
         dep_id = listing.deployment_id
-        task_id = f"{listing.slug}-train-easy-001"
+        task_id = task_ids_for_environment(client, listing.slug)[0]
         print(f"\n-- Quick session: {listing.slug} --")
         try:
             session = client.create_environment_session(dep_id, task_id=task_id)
             session = client.wait_for_session(session)
             result = client.environment_step(
-                    session.session_id, "Analyzing the problem...",
-                    session_token=session.session_token,
-                )
+                session.session_id,
+                submission("Analyzing the problem..."),
+                session_token=session.session_token,
+            )
             print(f"  Reward: {result.reward}, Done: {result.done}")
         except Exception as e:
             print(f"  Session skipped: {e}")
@@ -83,22 +85,15 @@ def publisher_workflow(client: Epsilab) -> None:
     except Exception:
         print("  No creator profile yet")
 
-    print("\n-- Your Namespaces --")
-    try:
-        namespaces = client.list_namespaces()
-        for ns in namespaces[:5]:
-            slug = ns.get("slug", "?")
-            ns_id = ns.get("namespace_id", "?")
-            print(f"    {slug:20s}  {ns_id}")
-    except Exception as e:
-        print(f"  {e}")
-
     print("\n-- Your Listings --")
     listings = client.list_environment_listings(limit=10)
-    owned = [l for l in listings if l.is_owner]
+    owned = [listing for listing in listings if listing.is_owner]
     print(f"  {len(owned)} owned listing(s)")
-    for l in owned[:5]:
-        print(f"    {l.slug:30s}  visibility={l.visibility}  moderation={l.moderation_state}")
+    for listing in owned[:5]:
+        print(
+            f"    {listing.slug:30s}  visibility={listing.visibility}  "
+            f"moderation={listing.moderation_state}"
+        )
 
 
 def parse_args() -> argparse.Namespace:

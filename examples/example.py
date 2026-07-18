@@ -15,6 +15,8 @@ import argparse
 
 from epsilab import Epsilab
 
+from _environment_utils import submission, task_ids_for_environment
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Quick start: run one environment session.")
@@ -30,11 +32,11 @@ def main() -> None:
     # ── Discover environments ────────────────────────────────────
     print("Discovering environments ...")
     listings = client.list_environment_listings(limit=20)
-    deployed = [l for l in listings if l.deployment_id]
+    deployed = [listing for listing in listings if listing.deployment_id]
     print(f"  {len(deployed)} environments with active deployments:\n")
 
-    for l in deployed[:10]:
-        print(f"    {l.slug:30s}  {l.title}")
+    for listing in deployed[:10]:
+        print(f"    {listing.slug:30s}  {listing.title}")
     if len(deployed) > 10:
         print(f"    ... and {len(deployed) - 10} more")
 
@@ -45,7 +47,7 @@ def main() -> None:
 
     # ── Pick an environment ──────────────────────────────────────
     if args.env:
-        match = [l for l in deployed if l.slug == args.env]
+        match = [listing for listing in deployed if listing.slug == args.env]
         if not match:
             print(f"\n  Environment '{args.env}' not found.")
             client.close()
@@ -55,7 +57,7 @@ def main() -> None:
         listing = deployed[0]
 
     dep_id = listing.deployment_id
-    task_id = f"{listing.slug}-train-easy-001"
+    task_id = task_ids_for_environment(client, listing.slug)[0]
     print(f"\n  Running: {listing.title} ({listing.slug})")
     print(f"  Deployment: {dep_id[:12]}...")
 
@@ -76,7 +78,9 @@ def main() -> None:
     print("\nTaking a step ...")
     action = "I'll analyze this step by step and provide a solution."
     result = client.environment_step(
-        session.session_id, action, session_token=session.session_token,
+        session.session_id,
+        submission(action),
+        session_token=session.session_token,
     )
     print(f"  Reward:     {result.reward}")
     print(f"  Terminated: {result.terminated}")

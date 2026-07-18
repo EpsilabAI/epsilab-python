@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epsilab"
-version = "0.16.0"
+version = "0.17.0"
 description = "Python SDK and CLI for the Epsilab RL Environment Hub and Marketplace."
 readme = "README.md"
 license = { file = "LICENSE" }
