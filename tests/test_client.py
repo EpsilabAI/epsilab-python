@@ -2858,9 +2858,23 @@ class TestCreateEnvironmentRelease:
             verifier_release_id="ver-1",
             action_schema_digest="sha256:" + "b" * 64,
             observation_schema_digest="sha256:" + "c" * 64,
+            application_tools=[
+                {
+                    "tool_release_id": "tool-release-1",
+                    "alias": "github",
+                    "configuration_digest": "sha256:" + "d" * 64,
+                }
+            ],
         )
         assert captured["method"] == "POST"
         assert captured["path"] == "/v1/environment-releases"
+        assert captured["body"]["application_tools"] == [
+            {
+                "tool_release_id": "tool-release-1",
+                "alias": "github",
+                "configuration_digest": "sha256:" + "d" * 64,
+            }
+        ]
         assert isinstance(result, EnvironmentRelease)
         assert result.release_id == "rel-new"
         assert result.status == "qualified"

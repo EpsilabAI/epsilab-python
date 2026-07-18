@@ -3944,7 +3944,7 @@ class EpsilabClient:
             observation_schema_digest: Digest of the observation JSON schema.
             resource_policy: Optional resource limits (cpu, memory, gpu).
             application_tools: Tool release bindings, each a dict with
-                ``tool_release_id``, ``dependency_alias``, and
+                ``tool_release_id``, ``alias``, and
                 ``configuration_digest``.
             idempotency_key: Unique key for at-most-once delivery.
 

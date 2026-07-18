@@ -142,6 +142,10 @@ def _ok(msg: str) -> None:
     print(msg)
 
 
+def _warn(msg: str) -> None:
+    print(f"Warning: {msg}", file=sys.stderr)
+
+
 def _table(rows: List[Dict[str, Any]], columns: List[str]) -> None:
     """Print a simple aligned table."""
     if not rows:
@@ -949,37 +953,79 @@ def _resolve_tool(client: EpsilabClient, namespace_id: str, slug: str, title: st
         raise
 
 
+def _environment_plugin_slugs(
+    project: dict[str, Any],
+    tasks: list[dict[str, Any]],
+    *,
+    uses_appsuite: bool,
+) -> list[str]:
+    """Return configured or task-derived AppSuite plugin slugs."""
+    configured = project.get("plugins")
+    if configured is not None:
+        if not isinstance(configured, list) or not all(
+            isinstance(item, str) for item in configured
+        ):
+            raise ValueError("project plugins must be a list of plugin slugs")
+        return sorted(set(configured))
+    if not uses_appsuite:
+        return []
+
+    inferred: set[str] = set()
+    for task in tasks:
+        workspace = task.get("workspace")
+        if not isinstance(workspace, dict):
+            continue
+        for field in ("seeds", "actors"):
+            values = workspace.get(field)
+            if isinstance(values, dict):
+                inferred.update(str(slug) for slug in values)
+    return sorted(inferred)
+
+
 def _resolve_tool_bindings(client: EpsilabClient, plugin_slugs: list[str]) -> list[dict[str, str]]:
-    """Resolve plugin slugs to application_tools binding dicts for release creation."""
+    """Resolve published plugin slugs to release binding payloads."""
     if not plugin_slugs:
         return []
     import hashlib as _hashlib
+
     tools = client.list_application_tools(limit=100)
-    slug_to_tool = {t.slug: t for t in tools}
     bindings: list[dict[str, str]] = []
-    for slug in plugin_slugs:
-        tool = slug_to_tool.get(slug)
-        if tool is None:
-            _warn(f"  Tool '{slug}' not found — skipping binding")
+    empty_configuration_digest = "sha256:" + _hashlib.sha256(b"{}").hexdigest()
+    for reference in sorted(set(plugin_slugs)):
+        namespace, separator, slug = reference.partition("/")
+        if not separator:
+            slug = namespace
+            namespace = ""
+        matches = [
+            tool
+            for tool in tools
+            if tool.slug == slug and (not namespace or tool.namespace == namespace)
+        ]
+        if not matches:
+            _warn(f"  Published tool '{reference}' not found; skipping its catalog binding")
             continue
-        rec_release_id = getattr(tool, "recommended_release_id", None)
+        if len(matches) > 1:
+            owners = ", ".join(sorted(f"{tool.namespace or '?'}/{tool.slug}" for tool in matches))
+            raise ValueError(
+                f"Tool '{reference}' is ambiguous ({owners}); configure it as <owner>/<slug>."
+            )
+        tool = matches[0]
+        rec_release_id = tool.recommended_release_id
         if not rec_release_id:
             try:
-                detail = client._request("GET", f"/v1/application-tools/{tool.tool_id}")
-                rec_release_id = detail.get("recommended_release_id")
-            except Exception:
-                pass
+                rec_release_id = client.get_application_tool(tool.tool_id).recommended_release_id
+            except EpsilabError:
+                _cli_logger.debug("Could not refresh application tool %s", tool.tool_id, exc_info=True)
         if not rec_release_id:
-            _warn(f"  Tool '{slug}' has no release — skipping binding")
+            _warn(f"  Published tool '{reference}' has no active release; skipping its catalog binding")
             continue
-        config_digest = "sha256:" + _hashlib.sha256(
-            f"{slug}:default".encode()
-        ).hexdigest()
-        bindings.append({
-            "tool_release_id": str(rec_release_id),
-            "dependency_alias": slug,
-            "configuration_digest": config_digest,
-        })
+        bindings.append(
+            {
+                "tool_release_id": str(rec_release_id),
+                "alias": slug,
+                "configuration_digest": empty_configuration_digest,
+            }
+        )
     return bindings
 
 
@@ -1202,7 +1248,13 @@ def _deploy_environment(
     ver_release_id = str(ver.get("release_id", ver.get("id", "")))
     status("Verifier registered", ok=True)
 
-    plugin_slugs = project.get("plugins", [])
+    plugin_slugs = _environment_plugin_slugs(
+        project,
+        tasks,
+        uses_appsuite="appsuite" in named_contexts,
+    )
+    if plugin_slugs:
+        project["plugins"] = plugin_slugs
     tool_bindings = _resolve_tool_bindings(client, plugin_slugs) if plugin_slugs else []
     if tool_bindings:
         status(f"Resolved {len(tool_bindings)} tool binding(s)", ok=True)

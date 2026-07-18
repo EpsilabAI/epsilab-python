@@ -19,11 +19,13 @@ from epsilab.cli import (
     _deploy_environment,
     _docker_build_and_upload,
     _encode_environment_action,
+    _environment_plugin_slugs,
     _get_client,
     _interactive_action,
     _normalize_cli_argv,
     _public_step_info,
     _resolve_environment_task,
+    _resolve_tool_bindings,
     _load_config,
     _resolve_api_key,
     _save_config,
@@ -33,6 +35,7 @@ from epsilab.cli import (
     cmd_env_verify,
     main,
 )
+from epsilab.models import ApplicationTool
 
 
 def _json_response(body, status=200):
@@ -1203,6 +1206,99 @@ class TestEnvironmentRunHelpers:
                 "runtime_config": {"secret": True},
             }
         ) == {"passed": True, "verification_status": "verified"}
+
+
+class TestApplicationToolBindings:
+    @staticmethod
+    def _tool(
+        slug: str,
+        *,
+        namespace: str = "epsilab",
+        release_id: str | None = None,
+    ) -> ApplicationTool:
+        return ApplicationTool(
+            tool_id=f"tool-{namespace}-{slug}",
+            namespace_id=f"namespace-{namespace}",
+            namespace=namespace,
+            slug=slug,
+            title=slug.title(),
+            category="application",
+            recommended_release_id=release_id,
+        )
+
+    def test_infers_plugins_from_composed_task_workspace(self):
+        tasks = [
+            {
+                "workspace": {
+                    "actors": {"gmail": "token", "slack": "token"},
+                    "seeds": {"gmail": {}, "support": {}, "slack": {}},
+                }
+            }
+        ]
+
+        assert _environment_plugin_slugs({}, tasks, uses_appsuite=True) == [
+            "gmail",
+            "slack",
+            "support",
+        ]
+        assert _environment_plugin_slugs({}, tasks, uses_appsuite=False) == []
+        assert _environment_plugin_slugs(
+            {"plugins": ["epsilab-apps/github", "slack", "slack"]},
+            tasks,
+            uses_appsuite=True,
+        ) == ["epsilab-apps/github", "slack"]
+
+    def test_resolves_api_contract_alias_and_canonical_empty_configuration(self):
+        class Client:
+            def list_application_tools(self, **_kwargs):
+                return [
+                    TestApplicationToolBindings._tool(
+                        "github",
+                        namespace="epsilab-apps",
+                        release_id="release-github",
+                    ),
+                    TestApplicationToolBindings._tool(
+                        "slack",
+                        release_id="release-slack",
+                    ),
+                ]
+
+        bindings = _resolve_tool_bindings(
+            Client(),
+            ["slack", "epsilab-apps/github"],
+        )
+        empty_digest = (
+            "sha256:44136fa355b3678a1146ad16f7e8649e"
+            "94fb4fc21fe77e8310c060f61caaff8a"
+        )
+
+        assert bindings == [
+            {
+                "tool_release_id": "release-github",
+                "alias": "github",
+                "configuration_digest": empty_digest,
+            },
+            {
+                "tool_release_id": "release-slack",
+                "alias": "slack",
+                "configuration_digest": empty_digest,
+            },
+        ]
+
+    def test_ambiguous_unqualified_tool_requires_owner(self):
+        class Client:
+            def list_application_tools(self, **_kwargs):
+                return [
+                    TestApplicationToolBindings._tool(
+                        "slack", namespace="one", release_id="release-one"
+                    ),
+                    TestApplicationToolBindings._tool(
+                        "slack", namespace="two", release_id="release-two"
+                    ),
+                ]
+
+        with pytest.raises(ValueError, match="configure it as <owner>/<slug>"):
+            _resolve_tool_bindings(Client(), ["slack"])
 
 
 class TestRunEnvironmentCommand:
