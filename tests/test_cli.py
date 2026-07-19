@@ -19,10 +19,12 @@ from epsilab.cli import (
     _deploy_environment,
     _docker_build_and_upload,
     _encode_environment_action,
+    _environment_horizon_errors,
     _environment_plugin_slugs,
     _get_client,
     _interactive_action,
     _normalize_cli_argv,
+    _platform_openenv_max_steps,
     _public_step_info,
     _resolve_environment_task,
     _resolve_tool_bindings,
@@ -1633,6 +1635,30 @@ class TestRunEnvironmentCommand:
 
 
 class TestRootDeployCommand:
+    def test_platform_horizon_capability_is_enforced_before_build(self, tmp_path):
+        directory = tmp_path / "environment"
+        directory.mkdir()
+        (directory / "Dockerfile").write_text("FROM scratch\n")
+
+        class Client:
+            def get_platform_config(self):
+                return {
+                    "environment_limits": {
+                        "runtimes": {"openenv": {"max_steps": 499}}
+                    }
+                }
+
+        args = build_parser().parse_args(["deploy", str(directory), "--yes"])
+        with pytest.raises(ValueError, match="max_steps must be an integer in \\[1, 499\\]"):
+            _deploy_environment(
+                args,
+                Client(),
+                directory,
+                {"tasks": [{"task_id": "long-task", "max_steps": 500}]},
+                {"listing_id": "listing", "slug": "long-env", "version": "1.0.0"},
+                "namespace",
+            )
+
     def test_docker_build_uses_named_context(self, tmp_path):
         directory = tmp_path / "environment"
         appsuite = tmp_path / "AppSuite"
@@ -1757,6 +1783,14 @@ class TestRootDeployCommand:
 
         def handler(req):
             captured["paths"].append((req.method, req.url.path))
+            if req.method == "GET" and req.url.path == "/v1/platform/config":
+                return _json_response(
+                    {
+                        "environment_limits": {
+                            "runtimes": {"openenv": {"max_steps": 10_000}}
+                        }
+                    }
+                )
             if req.method == "GET" and req.url.path == "/v1/environment-listings":
                 return _json_response([existing_listing])
             if req.method == "GET" and req.url.path == "/v1/application-tools":
@@ -1866,6 +1900,46 @@ class TestEnvVerify:
         cmd_env_verify(verify_args)
         out = capsys.readouterr().out
         assert "runtime_digest format is valid" in out
+
+    def test_verify_accepts_500_step_task(self, tmp_path, capsys):
+        target = tmp_path / "long-env"
+        target.mkdir()
+        (target / "tasks.json").write_text(
+            json.dumps([{"task_id": "long-task", "max_steps": 500}])
+        )
+
+        verify_args = build_parser().parse_args(["env", "verify", "-d", str(target)])
+        cmd_env_verify(verify_args)
+
+        assert "maximum 500" in capsys.readouterr().out
+
+    def test_verify_rejects_task_above_openenv_limit(self, tmp_path, capsys):
+        target = tmp_path / "too-long-env"
+        target.mkdir()
+        (target / "tasks.json").write_text(
+            json.dumps([{"task_id": "too-long", "max_steps": 10_001}])
+        )
+
+        verify_args = build_parser().parse_args(["env", "verify", "-d", str(target)])
+        with pytest.raises(SystemExit):
+            cmd_env_verify(verify_args)
+
+        assert "max_steps must be an integer in [1, 10000]" in capsys.readouterr().out
+
+
+def test_legacy_platform_without_capabilities_keeps_200_step_guard() -> None:
+    class Client:
+        def get_platform_config(self):
+            return {"api_version": "v1"}
+
+    assert _platform_openenv_max_steps(Client()) == 200
+    assert _environment_horizon_errors(
+        [{"task_id": "long-task", "max_steps": 500}],
+        max_steps=200,
+        source="the target Foundation platform",
+    ) == [
+        "long-task: max_steps must be an integer in [1, 200] for the target Foundation platform"
+    ]
 
 
 class TestSubcommandHelpExits:

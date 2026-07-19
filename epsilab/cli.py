@@ -43,6 +43,8 @@ _DEFAULT_PROFILE = "default"
 
 _DASHBOARD_URL = "https://app.epsilab.com"
 _DOCS_URL = "https://app.epsilab.com"
+_MAX_LOCAL_OPENENV_STEPS = 10_000
+_LEGACY_PLATFORM_OPENENV_STEPS = 200
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -94,6 +96,36 @@ def _get_client(profile: Optional[str] = None) -> EpsilabClient:
         )
     api_base = os.environ.get("EPSILAB_API_BASE")
     return EpsilabClient(api_key=api_key, api_base=api_base)
+
+
+def _platform_openenv_max_steps(client: EpsilabClient) -> int:
+    """Resolve the target Foundation horizon, failing closed for legacy APIs."""
+    config = client.get_platform_config()
+    try:
+        value = config["environment_limits"]["runtimes"]["openenv"]["max_steps"]
+    except (KeyError, TypeError):
+        return _LEGACY_PLATFORM_OPENENV_STEPS
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("Foundation returned an invalid OpenEnv max_steps capability")
+    return value
+
+
+def _environment_horizon_errors(
+    tasks: list[dict[str, Any]],
+    *,
+    max_steps: int,
+    source: str,
+) -> list[str]:
+    errors: list[str] = []
+    for index, task in enumerate(tasks):
+        task_id = task.get("task_id", f"task #{index + 1}")
+        value = task.get("max_steps", 50)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= max_steps:
+            errors.append(
+                f"{task_id}: max_steps must be an integer in [1, {max_steps}] "
+                f"for {source}"
+            )
+    return errors
 
 
 def _err(msg: str) -> None:
@@ -1127,6 +1159,15 @@ def _deploy_environment(
         version = text("Version", default=version)
 
     image_tag = f"{project['slug']}:{version}"
+    tasks = detected.get("tasks", [])
+    if tasks:
+        horizon_errors = _environment_horizon_errors(
+            tasks,
+            max_steps=_platform_openenv_max_steps(client),
+            source="the target Foundation platform",
+        )
+        if horizon_errors:
+            raise ValueError("Environment is not deployable:\n- " + "\n- ".join(horizon_errors))
 
     step("Building and uploading")
     build_args = {}
@@ -1174,7 +1215,6 @@ def _deploy_environment(
 
     step("Registering release")
 
-    tasks = detected.get("tasks", [])
     if tasks:
         _ok(f"  Creating {len(tasks)} tasks ...")
         for t in tasks:
@@ -2156,6 +2196,33 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
     passed: list[str] = []
 
     _ok("Verifying environment project...\n")
+
+    tasks_path = target / "tasks.json"
+    if tasks_path.exists():
+        try:
+            tasks_value = json.loads(tasks_path.read_text())
+            if not isinstance(tasks_value, list) or any(
+                not isinstance(task, dict) for task in tasks_value
+            ):
+                errors.append("tasks.json must contain a list of task objects")
+            else:
+                horizon_errors = _environment_horizon_errors(
+                    tasks_value,
+                    max_steps=_MAX_LOCAL_OPENENV_STEPS,
+                    source="the OpenEnv contract",
+                )
+                errors.extend(horizon_errors)
+                if not horizon_errors:
+                    longest = max(
+                        (int(task.get("max_steps", 50)) for task in tasks_value),
+                        default=0,
+                    )
+                    passed.append(
+                        f"Task horizons are valid (maximum {longest}; OpenEnv limit "
+                        f"{_MAX_LOCAL_OPENENV_STEPS})"
+                    )
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"tasks.json is not valid JSON: {exc}")
 
     # ── 1. Manifest checks (optional — deploy flow doesn't use manifests) ──
     if not manifest_path.exists():
