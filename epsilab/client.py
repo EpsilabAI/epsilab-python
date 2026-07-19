@@ -2792,7 +2792,7 @@ class EpsilabClient:
         task_id: str,
         policy_fn: Callable[[str, Dict[str, Any]], Union[str, Dict[str, Any]]],
         seed: Optional[int] = None,
-        max_steps: int = 100,
+        max_steps: int = 10_000,
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentSession":
         """Run a complete environment episode using your policy function.
@@ -2807,7 +2807,7 @@ class EpsilabClient:
             task_id: Task to execute.
             policy_fn: Callable ``(observation, info) -> action``.
             seed: Optional seed for reproducibility.
-            max_steps: Safety limit on steps.
+            max_steps: Client-side safety limit on steps (default 10,000).
             idempotency_key: Unique key for session creation.
 
         Returns:
@@ -3179,7 +3179,7 @@ class EpsilabClient:
         name: str,
         task_seed_pairs: List[Dict[str, Any]],
         policy_fn: Callable[[str, Dict[str, Any]], Union[str, Dict[str, Any]]],
-        max_steps_per_session: int = 100,
+        max_steps_per_session: int = 10_000,
         poll_interval: float = 1.0,
         timeout: float = 1800.0,
         max_credits: Optional[int] = None,
@@ -3220,7 +3220,7 @@ class EpsilabClient:
         batch_id: str,
         *,
         policy_fn: Callable[[str, Dict[str, Any]], Union[str, Dict[str, Any]]],
-        max_steps_per_session: int = 100,
+        max_steps_per_session: int = 10_000,
         poll_interval: float = 1.0,
         timeout: float = 1800.0,
     ) -> Dict[str, Any]:
