@@ -87,6 +87,54 @@ export = client.create_environment_export(
 )
 ~~~
 
+### Run a long-horizon coding agent
+
+`run_agent_episode` separates model turns from environment steps. A model may
+reason for many turns before calling a tool; every request, reasoning chunk,
+assistant message, tool boundary, result, usage record, cancellation, and
+error is persisted immediately in the session trace.
+
+```python
+from epsilab import AgentToolCall, AgentTurn, AgentUsage, Epsilab
+
+client = Epsilab()
+
+def call_your_model(context):
+    # Invoke any provider here. Translate its response into AgentTurn.
+    # Do not set a provider token limit if you want an uncapped generation.
+    response = your_provider_call(context.history, context.observation)
+    return AgentTurn(
+        reasoning=response.reasoning,
+        message=response.message,
+        tool_calls=[
+            AgentToolCall(call_id=call.id, name=call.name, arguments=call.arguments)
+            for call in response.tool_calls
+        ],
+        usage=AgentUsage(
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost_usd=response.cost_usd,
+        ),
+        provider=response.provider,
+        model=response.model,
+        provider_request_id=response.request_id,
+    )
+
+rollout = client.run_agent_episode(
+    deployment_id="deployment-id",
+    task_id="task-id",
+    model_fn=call_your_model,
+    max_turns=500,
+    cancel_check=my_cancel_event.is_set,
+)
+print(rollout.stop_reason, rollout.turns_completed, rollout.session.total_reward)
+```
+
+The SDK has no token budget or per-generation cap. `max_turns` is the only
+runner limit (maximum 500 model calls); the environment's own immutable task
+horizon still governs tool actions. See `examples/run_long_horizon_agent.py`
+for a provider-neutral adapter skeleton.
+
 ### Post-training with multiple environments
 
 For generalist RL post-training, train across diverse environments

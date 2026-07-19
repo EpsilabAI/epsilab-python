@@ -24,6 +24,9 @@ from dotenv import dotenv_values
 
 from .exceptions import ApiError, AuthError, InsufficientCreditsError, RateLimitError
 from .models import (
+    AgentEpisodeResult,
+    AgentRunContext,
+    AgentTurn,
     ApplicationTool,
     ApplicationToolRelease,
     ArtifactSummary,
@@ -76,6 +79,19 @@ _QUALITY_REPORT_TYPES = frozenset(
     }
 )
 _DEFAULT_BACKOFF_MAX = 60.0
+_TRACE_EVENT_TYPES = frozenset(
+    {
+        "model_request",
+        "reasoning",
+        "assistant_message",
+        "tool_call",
+        "tool_result",
+        "usage",
+        "lifecycle",
+        "error",
+        "cancellation",
+    }
+)
 
 
 class EpsilabClient:
@@ -2623,6 +2639,8 @@ class EpsilabClient:
         *,
         task_id: str,
         seed: Optional[int] = None,
+        model: Optional[str] = None,
+        agent_id: Optional[str] = None,
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentSession":
         """Create a hosted environment session.
@@ -2634,6 +2652,8 @@ class EpsilabClient:
             deployment_id: The deployment to run on.
             task_id: Task to execute in this session.
             seed: Optional seed for reproducible episodes.
+            model: Optional model identifier recorded on the session.
+            agent_id: Optional agent/harness identifier recorded on the session.
             idempotency_key: Unique key to prevent duplicate creation.
 
         Returns:
@@ -2643,6 +2663,10 @@ class EpsilabClient:
         body: Dict[str, Any] = {"task_id": task_id}
         if seed is not None:
             body["seed"] = seed
+        if model is not None:
+            body["model"] = model
+        if agent_id is not None:
+            body["agent_id"] = agent_id
         headers: Dict[str, str] = {
             "Idempotency-Key": idempotency_key or self._auto_idem_key(),
         }
@@ -2783,6 +2807,74 @@ class EpsilabClient:
         return self._request(
             "POST",
             f"/v1/environment-sessions/{self._path_segment(session_id)}/token",
+        )
+
+    def append_environment_trace_event(
+        self,
+        session_id: str,
+        *,
+        event_type: str,
+        payload: Dict[str, Any],
+        session_token: str,
+        occurred_at: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Persist one agent/model event without advancing the environment."""
+        if event_type not in _TRACE_EVENT_TYPES:
+            raise ValueError(f"unsupported trace event type: {event_type}")
+        if not isinstance(payload, dict):
+            raise TypeError("trace event payload must be a dictionary")
+        if not session_token:
+            raise ValueError("session_token is required for trace events")
+        body: Dict[str, Any] = {"event_type": event_type, "payload": payload}
+        if occurred_at is not None:
+            body["occurred_at"] = occurred_at
+        return self._request(
+            "POST",
+            f"/v1/environment-sessions/{self._path_segment(session_id)}/trace-events",
+            json_body=body,
+            extra_headers={
+                "X-RL-Session-Token": session_token,
+                "Idempotency-Key": idempotency_key or self._auto_idem_key(),
+            },
+        )
+
+    def run_agent_episode(
+        self,
+        deployment_id: str,
+        *,
+        task_id: str,
+        model_fn: Callable[[AgentRunContext], AgentTurn],
+        seed: Optional[int] = None,
+        model: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        max_turns: int = 500,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> AgentEpisodeResult:
+        """Run a multi-turn tool-calling agent with durable per-turn traces.
+
+        ``max_turns`` counts model calls, not environment actions. Reasoning-only
+        turns are allowed and recorded. The SDK imposes no token budget or
+        per-turn generation limit; those remain entirely provider-controlled.
+        """
+        from .agent_runner import LongHorizonAgentRunner
+
+        if isinstance(max_turns, bool) or not isinstance(max_turns, int) or not 1 <= max_turns <= 500:
+            raise ValueError("max_turns must be between 1 and 500")
+        session = self.create_environment_session(
+            deployment_id,
+            task_id=task_id,
+            seed=seed,
+            model=model,
+            agent_id=agent_id,
+            idempotency_key=idempotency_key,
+        )
+        return LongHorizonAgentRunner(self).run(
+            session,
+            model_fn=model_fn,
+            max_turns=max_turns,
+            cancel_check=cancel_check,
         )
 
     def run_environment_episode(

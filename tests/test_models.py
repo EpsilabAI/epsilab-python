@@ -7,6 +7,7 @@ default-value handling for every public model class.
 import json
 
 from epsilab.models import (
+    AgentTraceEvent,
     ApplicationTool,
     ApplicationToolRelease,
     ArtifactSummary,
@@ -486,6 +487,14 @@ class TestRLTrajectory:
                     {"step_idx": 0, "action_hash": "a1", "reward": 0.5},
                     {"step_idx": 1, "action_hash": "a2", "reward": 1.0},
                 ],
+                "trace_events": [
+                    {
+                        "event_id": "evt-1",
+                        "event_idx": 0,
+                        "event_type": "reasoning",
+                        "payload": {"content": "plan"},
+                    }
+                ],
             }
         )
         assert t.session_id == "sess-001"
@@ -494,6 +503,14 @@ class TestRLTrajectory:
         assert t.steps_taken == 5
         assert len(t.steps) == 2
         assert t.steps[0]["action_hash"] == "a1"
+        assert t.trace_events == [
+            AgentTraceEvent(
+                event_id="evt-1",
+                event_idx=0,
+                event_type="reasoning",
+                payload={"content": "plan"},
+            )
+        ]
 
     def test_defaults(self):
         t = RLTrajectory.from_dict(
@@ -507,6 +524,7 @@ class TestRLTrajectory:
         assert t.total_reward is None
         assert t.steps_taken == 0
         assert t.steps == []
+        assert t.trace_events == []
 
     def test_serialization(self):
         trajectory = RLTrajectory(
