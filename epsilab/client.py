@@ -1658,6 +1658,7 @@ class EpsilabClient:
         reward_mode: str = "continuous",
         seed: Optional[int] = None,
         max_steps: Optional[int] = None,
+        model: Optional[str] = None,
     ) -> "RLSession":
         """Create an RL environment session and get the initial observation.
 
@@ -1670,6 +1671,9 @@ class EpsilabClient:
                 ``partial_credit``.
             seed: Optional seed for reproducible episodes (simulation envs).
             max_steps: Override default max steps for multi-step envs.
+            model: Model identifier used by the agent (e.g.
+                ``"qwen/qwen3-coder"``). Stored with the session for
+                analytics.
 
         Returns:
             An :class:`~epsilab.models.RLSession` with the initial observation.
@@ -1683,6 +1687,8 @@ class EpsilabClient:
             body["seed"] = seed
         if max_steps is not None:
             body["max_steps"] = max_steps
+        if model is not None:
+            body["model"] = model
         data = self._request("POST", "/v1/rl/sessions", json_body=body)
         return RLSession.from_dict(data)
 
@@ -1690,6 +1696,8 @@ class EpsilabClient:
         self,
         session_id: str,
         action: str,
+        *,
+        usage: Optional[Dict[str, Any]] = None,
     ) -> "RLStepResult":
         """Take an action in an RL environment session.
 
@@ -1701,15 +1709,21 @@ class EpsilabClient:
                 - **code_sandbox**: Python code (complete function).
                 - **simulation**: JSON-encoded action dict.
                 - **agent_workflow**: JSON tool call.
+            usage: Optional token usage for this step. Keys:
+                ``input_tokens`` (int), ``output_tokens`` (int),
+                ``model`` (str).
 
         Returns:
             An :class:`~epsilab.models.RLStepResult` with the observation,
             reward, and terminal flags.
         """
+        body: Dict[str, Any] = {"action": action}
+        if usage is not None:
+            body["usage"] = usage
         data = self._request(
             "POST",
             f"/v1/rl/sessions/{self._path_segment(session_id)}/step",
-            json_body={"action": action},
+            json_body=body,
         )
         return RLStepResult.from_dict(data)
 
