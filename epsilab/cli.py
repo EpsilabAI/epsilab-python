@@ -596,6 +596,7 @@ def _docker_build_and_upload(
     client: EpsilabClient, directory: Path, image_tag: str,
     *, build_context: Path | None = None, build_args: dict | None = None,
     named_contexts: dict[str, Path] | None = None,
+    keep_local_image: bool = False,
 ) -> dict:
     """Build a Docker image locally and upload via the API.
 
@@ -606,7 +607,7 @@ def _docker_build_and_upload(
     import tempfile
 
     ctx = build_context or directory
-    local_tag = f"epsilab-local/{image_tag.split('/')[-1] if '/' in image_tag else image_tag}"
+    local_tag = _docker_local_tag(image_tag)
 
     cmd = ["docker", "build", "--platform", "linux/amd64"]
     for k, v in (build_args or {}).items():
@@ -625,6 +626,7 @@ def _docker_build_and_upload(
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
         tarball_path = tmp.name
 
+    upload_succeeded = False
     try:
         _ok("  Saving image ...")
         save = subprocess.run(
@@ -640,11 +642,99 @@ def _docker_build_and_upload(
         upload_result = client.upload_image(tarball_path, tag=image_tag)
 
         _ok("  Uploaded successfully")
+        upload_succeeded = True
         return upload_result
     finally:
         Path(tarball_path).unlink(missing_ok=True)
-        subprocess.run(["docker", "rmi", local_tag],
-                       capture_output=True, timeout=30)
+        if not keep_local_image or not upload_succeeded:
+            _docker_remove_local_image(local_tag)
+
+
+def _docker_local_tag(image_tag: str) -> str:
+    """Return the predictable local tag used while publishing an image."""
+    return f"epsilab-local/{image_tag.rsplit('/', 1)[-1]}"
+
+
+def _docker_remove_local_image(local_tag: str) -> None:
+    """Best-effort cleanup for a locally built image."""
+    import subprocess
+
+    subprocess.run(
+        ["docker", "rmi", local_tag],
+        capture_output=True,
+        timeout=30,
+    )
+
+
+def _docker_upload_digest(upload: dict) -> str:
+    """Resolve the immutable digest returned by the image upload API."""
+    image_ref = upload.get("image_ref", "")
+    if "@sha256:" in image_ref:
+        return "sha256:" + image_ref.split("@sha256:")[-1]
+    return upload.get("content_digest", image_ref.split("@")[-1])
+
+
+def _docker_derive_runtime_and_upload(
+    client: EpsilabClient,
+    *,
+    verifier_local_tag: str,
+    image_tag: str,
+) -> dict:
+    """Publish a runtime image derived from, but stripped of, the verifier."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="epsilab-runtime-") as temp_dir:
+        directory = Path(temp_dir)
+        (directory / "Dockerfile").write_text(
+            f"FROM {verifier_local_tag}\n"
+            "USER 0\n"
+            "RUN rm -f /app/verifier.py /opt/epsilab/verifier.py\n"
+            'LABEL ai.epsilab.image-role="runtime"\n'
+            "USER 65532:65532\n"
+        )
+        return _docker_build_and_upload(client, directory, image_tag)
+
+
+def _build_and_upload_environment_images(
+    client: EpsilabClient,
+    directory: Path,
+    *,
+    slug: str,
+    version: str,
+    build_context: Path | None = None,
+    build_args: dict | None = None,
+    named_contexts: dict[str, Path] | None = None,
+) -> tuple[dict, dict]:
+    """Publish distinct runtime and verifier artifacts for an environment."""
+    runtime_tag = f"{slug}:{version}"
+    verifier_tag = f"{slug}-verifier:{version}"
+    verifier_local_tag = _docker_local_tag(verifier_tag)
+
+    verifier_upload = _docker_build_and_upload(
+        client,
+        directory,
+        verifier_tag,
+        build_context=build_context,
+        build_args=build_args,
+        named_contexts=named_contexts,
+        keep_local_image=True,
+    )
+    try:
+        runtime_upload = _docker_derive_runtime_and_upload(
+            client,
+            verifier_local_tag=verifier_local_tag,
+            image_tag=runtime_tag,
+        )
+    finally:
+        _docker_remove_local_image(verifier_local_tag)
+
+    runtime_digest = _docker_upload_digest(runtime_upload)
+    verifier_digest = _docker_upload_digest(verifier_upload)
+    if not runtime_digest or not verifier_digest or runtime_digest == verifier_digest:
+        raise ValueError(
+            "Runtime and verifier publishing must produce distinct immutable image digests."
+        )
+    return runtime_upload, verifier_upload
 
 
 def _content_digest(path: Path) -> str:
@@ -1158,7 +1248,6 @@ def _deploy_environment(
     if is_interactive() and not args.yes and not args.version and not project.get("version"):
         version = text("Version", default=version)
 
-    image_tag = f"{project['slug']}:{version}"
     tasks = detected.get("tasks", [])
     if tasks:
         horizon_errors = _environment_horizon_errors(
@@ -1198,20 +1287,25 @@ def _deploy_environment(
             )
         named_contexts["appsuite"] = appsuite_root
 
-    upload = _docker_build_and_upload(
-        client, directory, image_tag,
+    runtime_upload, verifier_upload = _build_and_upload_environment_images(
+        client,
+        directory,
+        slug=project["slug"],
+        version=version,
         build_context=build_context,
         build_args=build_args,
         named_contexts=named_contexts,
     )
-    oci_ref = upload["image_ref"]
-    if "@sha256:" in oci_ref:
-        digest = "sha256:" + oci_ref.split("@sha256:")[-1]
-    else:
-        digest = upload.get("content_digest", upload.get("image_ref", "").split("@")[-1])
-    status(f"Image: {project['slug']}:{version}", ok=True)
+    oci_ref = runtime_upload["image_ref"]
+    digest = _docker_upload_digest(runtime_upload)
+    verifier_ref = verifier_upload["image_ref"]
+    verifier_digest = _docker_upload_digest(verifier_upload)
+    status(f"Runtime image: {project['slug']}:{version}", ok=True)
     if digest:
-        status(f"Digest: {digest[:20]}...", ok=True)
+        status(f"Runtime digest: {digest[:20]}...", ok=True)
+    status(f"Verifier image: {project['slug']}-verifier:{version}", ok=True)
+    if verifier_digest:
+        status(f"Verifier digest: {verifier_digest[:20]}...", ok=True)
 
     step("Registering release")
 
@@ -1273,14 +1367,20 @@ def _deploy_environment(
     tp_release_id = str(tp.get("release_id", tp.get("id", "")))
     status(f"Task pack: {len(members)} tasks", ok=True)
 
-    ver_idem = _deterministic_idem_key("ver", namespace_id=namespace_id, slug=project["slug"], version=version, digest=digest)
+    ver_idem = _deterministic_idem_key(
+        "ver",
+        namespace_id=namespace_id,
+        slug=project["slug"],
+        version=version,
+        digest=verifier_digest,
+    )
     try:
         ver = client.create_verifier_release(
             namespace_id=namespace_id,
             name=f"{project['slug']}-verifier",
             release_version=version,
-            runtime_ref=oci_ref,
-            runtime_digest=digest,
+            runtime_ref=verifier_ref,
+            runtime_digest=verifier_digest,
             source_digest=source_digest,
             evidence_schema_digest=source_digest,
             reward_mode="binary",

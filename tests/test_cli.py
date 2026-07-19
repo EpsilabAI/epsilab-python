@@ -16,8 +16,10 @@ import pytest
 
 from epsilab.cli import (
     _active_profile,
+    _build_and_upload_environment_images,
     _deploy_environment,
     _docker_build_and_upload,
+    _docker_derive_runtime_and_upload,
     _encode_environment_action,
     _environment_horizon_errors,
     _environment_plugin_slugs,
@@ -1683,6 +1685,50 @@ class TestRootDeployCommand:
         context_index = build_command.index("--build-context")
         assert build_command[context_index + 1] == f"appsuite={appsuite}"
 
+    def test_runtime_image_removes_verifier_source(self, tmp_path):
+        captured = {}
+
+        def upload(_client, directory, image_tag, **_kwargs):
+            captured["dockerfile"] = (directory / "Dockerfile").read_text()
+            captured["image_tag"] = image_tag
+            return {
+                "image_ref": "registry.example/demo@sha256:" + "b" * 64,
+                "content_digest": "sha256:" + "b" * 64,
+            }
+
+        with patch("epsilab.cli._docker_build_and_upload", side_effect=upload):
+            result = _docker_derive_runtime_and_upload(
+                object(),
+                verifier_local_tag="epsilab-local/demo-verifier:1.0.0",
+                image_tag="demo:1.0.0",
+            )
+
+        assert captured["image_tag"] == "demo:1.0.0"
+        assert "FROM epsilab-local/demo-verifier:1.0.0" in captured["dockerfile"]
+        assert "rm -f /app/verifier.py /opt/epsilab/verifier.py" in captured["dockerfile"]
+        assert result["content_digest"] == "sha256:" + "b" * 64
+
+    def test_environment_images_must_have_distinct_digests(self, tmp_path):
+        directory = tmp_path / "environment"
+        directory.mkdir()
+        (directory / "Dockerfile").write_text("FROM scratch\n")
+        upload = {
+            "image_ref": "registry.example/demo@sha256:" + "a" * 64,
+            "content_digest": "sha256:" + "a" * 64,
+        }
+
+        with (
+            patch("epsilab.cli._docker_build_and_upload", return_value=upload),
+            patch("epsilab.cli._docker_remove_local_image"),
+            pytest.raises(ValueError, match="distinct immutable image digests"),
+        ):
+            _build_and_upload_environment_images(
+                object(),
+                directory,
+                slug="demo",
+                version="1.0.0",
+            )
+
     def test_composed_deploy_passes_current_appsuite_checkout(
         self,
         tmp_path,
@@ -1699,13 +1745,15 @@ class TestRootDeployCommand:
         (directory / "Dockerfile").write_text(
             "ARG ENV_PATH\nCOPY --from=appsuite src /tmp/AppSuite/src\n"
         )
-        captured = {}
+        captured = {"uploads": []}
 
-        def upload(*_args, **kwargs):
-            captured.update(kwargs)
+        def upload(*args, **kwargs):
+            image_tag = args[2]
+            captured["uploads"].append((image_tag, kwargs))
+            digest_char = "a" if "-verifier:" in image_tag else "b"
             return {
-                "image_ref": "registry.example/demo@sha256:" + "a" * 64,
-                "content_digest": "sha256:" + "a" * 64,
+                "image_ref": f"registry.example/{image_tag}@sha256:" + digest_char * 64,
+                "content_digest": "sha256:" + digest_char * 64,
             }
 
         class Client:
@@ -1728,6 +1776,7 @@ class TestRootDeployCommand:
                 return SimpleNamespace(namespace="epsilab", deployment_id="dep-1")
 
         monkeypatch.setattr("epsilab.cli._docker_build_and_upload", upload)
+        monkeypatch.setattr("epsilab.cli._docker_remove_local_image", lambda *_args: None)
         monkeypatch.setattr("epsilab.cli._save_project", lambda *_args: None)
         args = build_parser().parse_args(["deploy", str(directory), "--yes"])
         project = {
@@ -1747,9 +1796,14 @@ class TestRootDeployCommand:
             "namespace-1",
         )
 
-        assert captured["build_context"] == catalog
-        assert captured["build_args"] == {"ENV_PATH": "composed/demo"}
-        assert captured["named_contexts"] == {"appsuite": appsuite}
+        verifier_tag, verifier_kwargs = captured["uploads"][0]
+        runtime_tag, _runtime_kwargs = captured["uploads"][1]
+        assert verifier_tag == "demo-verifier:1.0.0"
+        assert runtime_tag == "demo:1.0.0"
+        assert verifier_kwargs["build_context"] == catalog
+        assert verifier_kwargs["build_args"] == {"ENV_PATH": "composed/demo"}
+        assert verifier_kwargs["named_contexts"] == {"appsuite": appsuite}
+        assert verifier_kwargs["keep_local_image"] is True
 
     def test_repairs_empty_project_ids_and_creates_openenv_deployment(
         self,
@@ -1759,7 +1813,7 @@ class TestRootDeployCommand:
         target = tmp_path / "demo-env"
         init_args = build_parser().parse_args(["init", "demo-env", "-d", str(target)])
         cmd_env_init(init_args)
-        captured = {"paths": [], "environment_body": None}
+        captured = {"paths": [], "environment_body": None, "verifier_body": None}
 
         existing_listing = {
             "listing_id": "lst-existing",
@@ -1802,6 +1856,7 @@ class TestRootDeployCommand:
             if req.method == "POST" and req.url.path == "/v1/task-pack-releases":
                 return _json_response({"release_id": "pack-1"}, status=201)
             if req.method == "POST" and req.url.path == "/v1/verifier-releases":
+                captured["verifier_body"] = json.loads(req.content)
                 return _json_response({"release_id": "ver-1"}, status=201)
             if req.method == "POST" and req.url.path == "/v1/environment-releases":
                 captured["environment_body"] = json.loads(req.content)
@@ -1822,13 +1877,21 @@ class TestRootDeployCommand:
             raise AssertionError(f"unexpected request: {req.method} {req.url.path}")
 
         client = _mock_client(handler)
-        upload = {
+        verifier_upload = {
             "image_ref": "registry.example/demo-env@sha256:" + "a" * 64,
             "content_digest": "sha256:" + "a" * 64,
         }
+        runtime_upload = {
+            "image_ref": "registry.example/demo-env@sha256:" + "b" * 64,
+            "content_digest": "sha256:" + "b" * 64,
+        }
         with (
             patch("epsilab.cli._get_client", return_value=client),
-            patch("epsilab.cli._docker_build_and_upload", return_value=upload),
+            patch(
+                "epsilab.cli._docker_build_and_upload",
+                side_effect=[verifier_upload, runtime_upload],
+            ),
+            patch("epsilab.cli._docker_remove_local_image"),
         ):
             main(["deploy", str(target), "--yes"])
 
@@ -1837,6 +1900,8 @@ class TestRootDeployCommand:
         assert project["listing_id"] == "lst-new"
         assert project["deployment_id"] == "dep-1"
         assert captured["environment_body"]["resource_policy"]["runtime_interface"] == "openenv"
+        assert captured["environment_body"]["runtime_digest"] == "sha256:" + "b" * 64
+        assert captured["verifier_body"]["runtime_digest"] == "sha256:" + "a" * 64
         assert ("POST", "/v1/environment-deployments") in captured["paths"]
         output = capsys.readouterr().out
         assert "Deployed demo-env@1.0.0" in output
