@@ -20,6 +20,10 @@ from epsilab.exceptions import (
     RateLimitError,
 )
 from epsilab.models import (
+    AgentRunContext,
+    AgentToolCall,
+    AgentTurn,
+    AgentUsage,
     ApplicationTool,
     ApplicationToolRelease,
     CostEstimate,
@@ -1645,6 +1649,14 @@ class TestGetRLTrajectory:
                             "truncated": False,
                         },
                     ],
+                    "trace_events": [
+                        {
+                            "event_id": "evt-1",
+                            "event_idx": 0,
+                            "event_type": "reasoning",
+                            "payload": {"content": "plan"},
+                        }
+                    ],
                 }
             )
 
@@ -1658,6 +1670,7 @@ class TestGetRLTrajectory:
         assert traj.total_reward == 1.0
         assert len(traj.steps) == 2
         assert traj.steps[1]["reward"] == 1.0
+        assert traj.trace_events[0].event_type == "reasoning"
 
 
 class TestVerifyRLTrajectory:
@@ -2596,6 +2609,176 @@ class TestRunEnvironmentEpisode:
 
         assert cancelled is True
         assert result.status == "cancelled"
+
+
+class TestLongHorizonAgentRunner:
+    def test_records_100_reasoning_turns_before_first_environment_action(self):
+        trace_events = []
+        step_calls = []
+        contexts = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            path = req.url.path
+            if path == "/v1/environment-deployments/dep-long/sessions":
+                body = json.loads(req.content)
+                assert body["model"] == "glm-5.2"
+                assert body["agent_id"] == "prime-intellect"
+                return _json_response(
+                    {
+                        "session_id": "sess-long",
+                        "task_id": "task-long",
+                        "status": "active",
+                        "session_token": "tok-long",
+                        "observation": "initial workspace",
+                        "steps_taken": 0,
+                    },
+                    status=202,
+                )
+            if path == "/v1/environment-sessions/sess-long/trace-events":
+                assert req.headers["X-RL-Session-Token"] == "tok-long"
+                assert len(req.headers["Idempotency-Key"]) >= 8
+                event = json.loads(req.content)
+                trace_events.append(event)
+                return _json_response({"event_idx": len(trace_events) - 1, **event})
+            if path == "/v1/environment-sessions/sess-long/step":
+                body = json.loads(req.content)
+                step_calls.append(json.loads(body["action"]))
+                return _json_response(
+                    {
+                        "observation": "submitted",
+                        "reward": 1.0,
+                        "terminated": True,
+                        "truncated": False,
+                        "info": {},
+                    }
+                )
+            if path == "/v1/environment-sessions/sess-long" and req.method == "GET":
+                return _json_response(
+                    {
+                        "session_id": "sess-long",
+                        "task_id": "task-long",
+                        "status": "completed",
+                        "total_reward": 1.0,
+                        "steps_taken": 1,
+                    }
+                )
+            return _json_response({}, 404)
+
+        def model_fn(context: AgentRunContext) -> AgentTurn:
+            contexts.append((context.turn_index, context.environment_steps, context.observation))
+            if context.turn_index < 100:
+                return AgentTurn(
+                    reasoning=f"planning turn {context.turn_index}",
+                    provider="prime-intellect",
+                    model="glm-5.2",
+                    provider_request_id=f"pi-{context.turn_index}",
+                    usage=AgentUsage(input_tokens=10, output_tokens=20),
+                )
+            return AgentTurn(
+                message="Ready to submit.",
+                tool_calls=[
+                    AgentToolCall(
+                        call_id="call-submit",
+                        name="submit",
+                        arguments={},
+                    )
+                ],
+                provider="prime-intellect",
+                model="glm-5.2",
+                provider_request_id="pi-100",
+                usage=AgentUsage(input_tokens=11, output_tokens=21),
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.run_agent_episode(
+            "dep-long",
+            task_id="task-long",
+            model_fn=model_fn,
+            model="glm-5.2",
+            agent_id="prime-intellect",
+            max_turns=500,
+        )
+
+        assert result.stop_reason == "environment_terminal"
+        assert result.turns_completed == 101
+        assert result.environment_steps == 1
+        assert result.input_tokens == 1011
+        assert result.output_tokens == 2021
+        assert contexts[99] == (99, 0, "initial workspace")
+        assert contexts[100] == (100, 0, "initial workspace")
+        assert step_calls == [{"input": {}, "tool": "submit"}]
+        event_types = [event["event_type"] for event in trace_events]
+        assert event_types.count("model_request") == 101
+        assert event_types.count("reasoning") == 100
+        assert event_types.count("tool_call") == 1
+        assert event_types.count("tool_result") == 1
+        assert trace_events[-1]["event_type"] == "lifecycle"
+
+    def test_cancellation_between_reasoning_turns_records_trace_and_cleans_up(self):
+        trace_types = []
+        cancelled = False
+        model_calls = 0
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal cancelled
+            path = req.url.path
+            if path == "/v1/environment-deployments/dep-cancel/sessions":
+                return _json_response(
+                    {
+                        "session_id": "sess-cancel",
+                        "task_id": "task-cancel",
+                        "status": "active",
+                        "session_token": "tok-cancel",
+                        "observation": "initial",
+                    },
+                    status=202,
+                )
+            if path.endswith("/trace-events"):
+                trace_types.append(json.loads(req.content)["event_type"])
+                return _json_response({})
+            if path.endswith("/cancel"):
+                cancelled = True
+                return _json_response({"status": "cancelled"})
+            if path == "/v1/environment-sessions/sess-cancel":
+                return _json_response(
+                    {
+                        "session_id": "sess-cancel",
+                        "task_id": "task-cancel",
+                        "status": "cancelled" if cancelled else "active",
+                    }
+                )
+            if path.endswith("/step"):
+                pytest.fail("reasoning-only turns must not step the environment")
+            return _json_response({}, 404)
+
+        def model_fn(_context: AgentRunContext) -> AgentTurn:
+            nonlocal model_calls
+            model_calls += 1
+            return AgentTurn(reasoning="still thinking")
+
+        client = _make_client(httpx.MockTransport(handler))
+        result = client.run_agent_episode(
+            "dep-cancel",
+            task_id="task-cancel",
+            model_fn=model_fn,
+            cancel_check=lambda: model_calls >= 2,
+        )
+
+        assert model_calls == 2
+        assert result.stop_reason == "cancelled"
+        assert result.environment_steps == 0
+        assert cancelled is True
+        assert "cancellation" in trace_types
+
+    def test_turn_limit_is_the_only_sdk_rollout_budget(self):
+        client = _make_client(httpx.MockTransport(lambda req: _json_response({})))
+        with pytest.raises(ValueError, match="between 1 and 500"):
+            client.run_agent_episode(
+                "dep",
+                task_id="task",
+                model_fn=lambda _context: AgentTurn(reasoning="thinking"),
+                max_turns=501,
+            )
 
 
 class TestRunBatch:

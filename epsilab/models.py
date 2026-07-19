@@ -517,6 +517,29 @@ class RLStepResult:
 
 
 @dataclass
+class AgentTraceEvent:
+    """One independently persisted model, reasoning, or tool event."""
+
+    event_id: str
+    event_idx: int
+    event_type: str
+    payload: Dict[str, Any] = field(default_factory=dict)
+    occurred_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AgentTraceEvent":
+        return cls(
+            event_id=str(data.get("event_id", "")),
+            event_idx=int(data.get("event_idx", 0)),
+            event_type=str(data.get("event_type", "")),
+            payload=dict(data.get("payload") or {}),
+            occurred_at=data.get("occurred_at"),
+            created_at=data.get("created_at"),
+        )
+
+
+@dataclass
 class RLTrajectory:
     """Full trajectory for a completed RL session.
 
@@ -528,6 +551,8 @@ class RLTrajectory:
         total_reward: Cumulative reward.
         steps_taken: Total steps.
         steps: List of step records (action_hash, observation, reward, terminated, truncated).
+        trace_events: Ordered model/reasoning/tool events, including events
+            recorded before the first environment step.
     """
 
     session_id: str
@@ -537,6 +562,7 @@ class RLTrajectory:
     total_reward: Optional[float] = None
     steps_taken: int = 0
     steps: List[Dict[str, Any]] = field(default_factory=list)
+    trace_events: List[AgentTraceEvent] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -554,6 +580,7 @@ class RLTrajectory:
             total_reward=data.get("total_reward"),
             steps_taken=data.get("steps_taken", 0),
             steps=data.get("steps", []),
+            trace_events=[AgentTraceEvent.from_dict(event) for event in data.get("trace_events", [])],
         )
 
 
@@ -892,6 +919,76 @@ class EnvironmentStepResult:
             truncated=data.get("truncated", False),
             info=data.get("info", {}),
         )
+
+
+@dataclass
+class AgentToolCall:
+    """One model-requested environment tool invocation."""
+
+    call_id: str
+    name: str
+    arguments: Dict[str, Any] = field(default_factory=dict)
+
+    def to_environment_action(self) -> Dict[str, Any]:
+        """Convert the provider-neutral call to the OpenEnv action shape."""
+        return {"tool": self.name, "input": dict(self.arguments)}
+
+
+@dataclass
+class AgentUsage:
+    """Optional provider usage and cost metadata for one model turn."""
+
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cached_input_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    cost_usd: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {key: value for key, value in asdict(self).items() if value is not None}
+
+
+@dataclass
+class AgentTurn:
+    """Provider-neutral output from a single model call.
+
+    A turn may contain reasoning or an assistant message without any tool
+    calls. Such turns are traced but do not advance the environment.
+    """
+
+    reasoning: Optional[str] = None
+    message: Optional[str] = None
+    tool_calls: List[AgentToolCall] = field(default_factory=list)
+    usage: Optional[AgentUsage] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    provider_request_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentRunContext:
+    """Conversation and environment state passed to the model callback."""
+
+    session_id: str
+    task_id: str
+    turn_index: int
+    environment_steps: int
+    observation: str
+    history: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class AgentEpisodeResult:
+    """Final state and accounting returned by the long-horizon runner."""
+
+    session: EnvironmentSession
+    stop_reason: str
+    turns_completed: int
+    environment_steps: int
+    input_tokens: int = 0
+    output_tokens: int = 0
+    history: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
