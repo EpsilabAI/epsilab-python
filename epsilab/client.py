@@ -1675,6 +1675,7 @@ class EpsilabClient:
         seed: Optional[int] = None,
         max_steps: Optional[int] = None,
         model: Optional[str] = None,
+        result_visibility: Optional[str] = None,
     ) -> "RLSession":
         """Create an RL environment session and get the initial observation.
 
@@ -1690,6 +1691,9 @@ class EpsilabClient:
             model: Model identifier used by the agent (e.g.
                 ``"qwen/qwen3-coder"``). Stored with the session for
                 analytics.
+            result_visibility: Controls who can see this session's results
+                on the leaderboard. One of ``"private"`` (default),
+                ``"tenant_only"``, or ``"public"``.
 
         Returns:
             An :class:`~epsilab.models.RLSession` with the initial observation.
@@ -1705,6 +1709,8 @@ class EpsilabClient:
             body["max_steps"] = max_steps
         if model is not None:
             body["model"] = model
+        if result_visibility is not None:
+            body["result_visibility"] = result_visibility
         data = self._request("POST", "/v1/rl/sessions", json_body=body)
         return RLSession.from_dict(data)
 
@@ -1952,6 +1958,27 @@ class EpsilabClient:
         if task_id:
             params["task_id"] = task_id
         return self._request("GET", "/v1/rl/sessions", params=params)
+
+    def update_session_visibility(
+        self,
+        session_id: str,
+        result_visibility: str,
+    ) -> Dict[str, Any]:
+        """Update result visibility for a session you own.
+
+        Args:
+            session_id: The session to update.
+            result_visibility: One of ``"private"``, ``"tenant_only"``,
+                or ``"public"``.
+
+        Returns:
+            Dict confirming the session_id and new result_visibility.
+        """
+        return self._request(
+            "PATCH",
+            f"/v1/rl/sessions/{self._path_segment(session_id)}/visibility",
+            json_body={"result_visibility": result_visibility},
+        )
 
     def get_rl_stats(
         self,
@@ -2641,6 +2668,7 @@ class EpsilabClient:
         seed: Optional[int] = None,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
+        result_visibility: Optional[str] = None,
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentSession":
         """Create a hosted environment session.
@@ -2654,6 +2682,10 @@ class EpsilabClient:
             seed: Optional seed for reproducible episodes.
             model: Optional model identifier recorded on the session.
             agent_id: Optional agent/harness identifier recorded on the session.
+            result_visibility: Controls who can see this session's results
+                on the leaderboard. One of ``"private"`` (default),
+                ``"tenant_only"``, or ``"public"``. When omitted, defaults
+                to the environment's ``default_result_visibility``.
             idempotency_key: Unique key to prevent duplicate creation.
 
         Returns:
@@ -2667,6 +2699,8 @@ class EpsilabClient:
             body["model"] = model
         if agent_id is not None:
             body["agent_id"] = agent_id
+        if result_visibility is not None:
+            body["result_visibility"] = result_visibility
         headers: Dict[str, str] = {
             "Idempotency-Key": idempotency_key or self._auto_idem_key(),
         }
@@ -2677,6 +2711,26 @@ class EpsilabClient:
             extra_headers=headers,
         )
         return EnvironmentSession.from_dict(data)
+
+    def get_evaluation_leaderboard(
+        self,
+        deployment_id: str,
+    ) -> Dict[str, Any]:
+        """Get the evaluation leaderboard for a deployment.
+
+        Returns model-grouped evaluation results ranked by average reward,
+        including public results and the caller's own private results.
+
+        Args:
+            deployment_id: The deployment whose evaluations to fetch.
+
+        Returns:
+            Dict with ``evaluations`` list of ranked model entries.
+        """
+        return self._request(
+            "GET",
+            f"/v1/environment-deployments/{self._path_segment(deployment_id)}/evaluations",
+        )
 
     def get_environment_session(self, session_id: str) -> "EnvironmentSession":
         """Get the current state of an environment session.
@@ -4065,6 +4119,7 @@ class EpsilabClient:
         visibility: Optional[str] = None,
         domain: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        default_result_visibility: Optional[str] = None,
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentListing":
         """Update a listing's metadata (creator operation).
@@ -4080,6 +4135,8 @@ class EpsilabClient:
             visibility: New visibility.
             domain: Environment domain (e.g. ``coding``, ``web``, ``ops``).
             tags: List of free-form tags.
+            default_result_visibility: Default visibility for new sessions
+                (``"private"``, ``"tenant_only"``, or ``"public"``).
             idempotency_key: Unique key for at-most-once delivery.
 
         Returns:
@@ -4098,6 +4155,8 @@ class EpsilabClient:
             body["domain"] = domain
         if tags is not None:
             body["tags"] = tags
+        if default_result_visibility is not None:
+            body["default_result_visibility"] = default_result_visibility
         data = self._request(
             "PATCH",
             f"/v1/environment-listings/{self._path_segment(listing_id)}",

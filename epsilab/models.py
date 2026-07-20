@@ -641,6 +641,7 @@ class EnvironmentListing:
     review_count: int = 0
     avg_rating: Optional[float] = None
     tasks: List[Dict[str, Any]] = field(default_factory=list)
+    default_result_visibility: str = "private"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -687,6 +688,7 @@ class EnvironmentListing:
             review_count=int(data.get("review_count", 0)),
             avg_rating=data.get("avg_rating"),
             tasks=list(data.get("tasks") or []),
+            default_result_visibility=data.get("default_result_visibility", "private"),
         )
 
 
