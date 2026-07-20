@@ -1676,6 +1676,7 @@ class EpsilabClient:
         max_steps: Optional[int] = None,
         model: Optional[str] = None,
         result_visibility: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> "RLSession":
         """Create an RL environment session and get the initial observation.
 
@@ -1694,6 +1695,9 @@ class EpsilabClient:
             result_visibility: Controls who can see this session's results
                 on the leaderboard. One of ``"private"`` (default),
                 ``"tenant_only"``, or ``"public"``.
+            run_id: Group multiple task sessions into a single evaluation
+                run. Sessions sharing the same ``run_id`` are displayed
+                together as one run.
 
         Returns:
             An :class:`~epsilab.models.RLSession` with the initial observation.
@@ -1711,6 +1715,8 @@ class EpsilabClient:
             body["model"] = model
         if result_visibility is not None:
             body["result_visibility"] = result_visibility
+        if run_id is not None:
+            body["run_id"] = run_id
         data = self._request("POST", "/v1/rl/sessions", json_body=body)
         return RLSession.from_dict(data)
 
@@ -2731,6 +2737,31 @@ class EpsilabClient:
             "GET",
             f"/v1/environment-deployments/{self._path_segment(deployment_id)}/evaluations",
         )
+
+    def get_session_runs(
+        self,
+        *,
+        deployment_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Get sessions grouped into evaluation runs.
+
+        A run groups multiple task sessions that were executed together as
+        part of one evaluation pass.
+
+        Args:
+            deployment_id: Filter by deployment.
+            limit: Max runs to return (1-200, default 50).
+            offset: Pagination offset.
+
+        Returns:
+            Dict with ``runs`` list and ``total`` count.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if deployment_id:
+            params["deployment_id"] = deployment_id
+        return self._request("GET", "/v1/rl/sessions/runs", params=params)
 
     def get_environment_session(self, session_id: str) -> "EnvironmentSession":
         """Get the current state of an environment session.
