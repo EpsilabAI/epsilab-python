@@ -2438,6 +2438,82 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
                 except Exception as e:
                     errors.append(f"POST /step failed: {e}")
 
+                # ── 4b. Tool smoke test ───────────────────────────
+                # Re-reset so we have a fresh observation with tools
+                tools_to_probe: dict[str, list[str]] = {}
+                try:
+                    with urllib.request.urlopen(
+                        urllib.request.Request(
+                            f"{base_url}/reset",
+                            data=reset_payload,
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        ),
+                        timeout=10,
+                    ) as resp:
+                        obs = json.loads(resp.read())
+                    obs_text = obs.get("observation", "")
+                    if isinstance(obs_text, str):
+                        try:
+                            obs_data = json.loads(obs_text)
+                        except (json.JSONDecodeError, TypeError):
+                            obs_data = {}
+                    elif isinstance(obs_text, dict):
+                        obs_data = obs_text
+                    else:
+                        obs_data = {}
+                    ctx = obs_data.get("context", {}) if isinstance(obs_data, dict) else {}
+                    raw_tools = ctx.get("tools", {})
+                    if isinstance(raw_tools, dict):
+                        tools_to_probe = raw_tools
+                except Exception:
+                    pass
+
+                _TOOL_PROBES: dict[str, dict] = {
+                    "files": {"plugin": "browser", "method": "files.list", "args": {}},
+                    "preview": {"plugin": "browser", "method": "preview.screenshot", "args": {}},
+                    "audit": {"plugin": "browser", "method": "audit.performance", "args": {"url": "about:blank"}},
+                    "calendar": {"plugin": "calendar", "method": "calendars.list", "args": {}},
+                    "github": {"plugin": "github", "method": "repos.list", "args": {}},
+                    "pagerduty": {"plugin": "pagerduty", "method": "incidents.list", "args": {}},
+                    "support": {"plugin": "support", "method": "tickets.list", "args": {}},
+                    "gmail": {"plugin": "gmail", "method": "messages.list", "args": {"userId": "me"}},
+                }
+
+                if tools_to_probe:
+                    _ok(f"  Probing {len(tools_to_probe)} tool(s): {', '.join(sorted(tools_to_probe))}")
+                    for tool_name in sorted(tools_to_probe):
+                        probe = _TOOL_PROBES.get(tool_name)
+                        if probe is None:
+                            probe = {
+                                "plugin": tool_name,
+                                "method": f"{tool_name}.list"
+                                    if any(m.endswith(".list") for m in tools_to_probe.get(tool_name, []))
+                                    else (tools_to_probe.get(tool_name, ["unknown"])[0]),
+                                "args": {},
+                            }
+                        try:
+                            step_req = urllib.request.Request(
+                                f"{base_url}/step",
+                                data=json.dumps({"action": probe}).encode(),
+                                headers={"Content-Type": "application/json"},
+                                method="POST",
+                            )
+                            with urllib.request.urlopen(step_req, timeout=30) as resp:
+                                probe_body = json.loads(resp.read())
+                            probe_obs = probe_body.get("observation", "")
+                            if isinstance(probe_obs, str) and "error" in probe_obs.lower():
+                                try:
+                                    probe_detail = json.loads(probe_obs)
+                                    err_msg = probe_detail.get("error", probe_obs[:200])
+                                except (json.JSONDecodeError, TypeError):
+                                    err_msg = probe_obs[:200]
+                                errors.append(f"Tool '{tool_name}' returned error: {err_msg}")
+                            else:
+                                passed.append(f"Tool '{tool_name}' responds without error")
+                        except Exception as e:
+                            errors.append(f"Tool '{tool_name}' probe failed: {e}")
+
         finally:
             if container_id:
                 subprocess.run(
