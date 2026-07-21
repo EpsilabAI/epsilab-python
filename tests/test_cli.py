@@ -1440,11 +1440,16 @@ class TestEnvironmentRunHelpers:
         assert _public_step_info(
             {
                 "passed": True,
+                "verification_authority": "independent_verifier",
                 "verification_status": "verified",
                 "provider_key": "internal",
                 "runtime_config": {"secret": True},
             }
-        ) == {"passed": True, "verification_status": "verified"}
+        ) == {
+            "passed": True,
+            "verification_authority": "independent_verifier",
+            "verification_status": "verified",
+        }
 
 
 class TestApplicationToolBindings:
@@ -1654,6 +1659,7 @@ class TestRunEnvironmentCommand:
                         "truncated": False,
                         "info": {
                             "passed": True,
+                            "verification_authority": "independent_verifier",
                             "verification_status": "verified",
                             "provider_key": "not-public",
                         },
@@ -1681,6 +1687,7 @@ class TestRunEnvironmentCommand:
         }
         output = capsys.readouterr().out
         assert "Reward: 1.0000" in output
+        assert "verification_authority: independent_verifier" in output
         assert "verification_status: verified" in output
         assert "not-public" not in output
 

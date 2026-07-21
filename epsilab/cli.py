@@ -3351,6 +3351,7 @@ def _public_step_info(info_data: Any) -> dict[str, Any]:
         "terminal_reason",
         "tests_passed",
         "tests_total",
+        "verification_authority",
         "verification_evidence_digest",
         "verification_status",
     }
