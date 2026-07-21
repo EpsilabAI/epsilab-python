@@ -534,6 +534,34 @@ _PROJECT_DIR = ".epsilab"
 _PROJECT_FILE = "project.json"
 
 
+def _hash_build_context(directory: Path) -> str:
+    """Compute a content hash of the build context for incremental build detection."""
+    import hashlib
+
+    h = hashlib.sha256()
+    dockerignore = directory / ".dockerignore"
+    ignore_patterns: set[str] = set()
+    if dockerignore.exists():
+        for line in dockerignore.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                ignore_patterns.add(line)
+
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = sorted(d for d in dirs if d not in {".git", "__pycache__", ".epsilab", "node_modules"})
+        for fname in sorted(files):
+            fpath = Path(root) / fname
+            rel = str(fpath.relative_to(directory))
+            if any(rel.startswith(p.strip("*/")) for p in ignore_patterns if not p.startswith("!")):
+                continue
+            try:
+                h.update(rel.encode())
+                h.update(fpath.read_bytes())
+            except (OSError, PermissionError):
+                continue
+    return h.hexdigest()
+
+
 def _detect_project_type(directory: Path) -> dict:
     """Auto-detect whether a directory is an environment or an application tool."""
     detected: dict = {"directory": str(directory.resolve()), "type": "unknown"}
@@ -589,7 +617,7 @@ def _save_project(directory: Path, project: dict) -> None:
     project_file.write_text(json.dumps(project, indent=2) + "\n")
     gitignore = project_dir / ".gitignore"
     if not gitignore.exists():
-        gitignore.write_text("# managed by epsilab cli\nproject.json\n")
+        gitignore.write_text("# managed by epsilab cli\nproject.json\n.build_hash\n.build_info.json\n")
 
 
 def _docker_build_and_upload(
@@ -1170,6 +1198,30 @@ def _deploy_environment(
             raise ValueError("Environment is not deployable:\n- " + "\n- ".join(horizon_errors))
 
     step("Building and uploading")
+
+    # Incremental build: skip if the build context hash matches a previous build
+    build_cache_dir = directory / ".epsilab"
+    build_hash_file = build_cache_dir / ".build_hash"
+    build_info_file = build_cache_dir / ".build_info.json"
+    skip_build = False
+    cached_upload = None
+
+    current_hash = _hash_build_context(directory)
+    if (
+        not getattr(args, "force", False)
+        and build_hash_file.exists()
+        and build_info_file.exists()
+        and build_hash_file.read_text().strip() == current_hash
+    ):
+        try:
+            cached_upload = json.loads(build_info_file.read_text())
+            if cached_upload.get("image_ref"):
+                skip_build = True
+                _ok(f"  Build context unchanged (hash={current_hash[:12]}...) — skipping build")
+                _ok("  Use --force to rebuild")
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     build_args = {}
     named_contexts: dict[str, Path] = {}
     shared_dir = directory.parent.parent / "_shared" if (directory.parent.parent / "_shared").exists() else None
@@ -1198,12 +1250,23 @@ def _deploy_environment(
             )
         named_contexts["appsuite"] = appsuite_root
 
-    upload = _docker_build_and_upload(
-        client, directory, image_tag,
-        build_context=build_context,
-        build_args=build_args,
-        named_contexts=named_contexts,
-    )
+    if skip_build and cached_upload:
+        upload = cached_upload
+    else:
+        upload = _docker_build_and_upload(
+            client, directory, image_tag,
+            build_context=build_context,
+            build_args=build_args,
+            named_contexts=named_contexts,
+        )
+        # Cache build info for incremental builds
+        try:
+            build_cache_dir.mkdir(parents=True, exist_ok=True)
+            build_hash_file.write_text(current_hash)
+            build_info_file.write_text(json.dumps(upload, default=str))
+        except OSError:
+            pass
+
     oci_ref = upload["image_ref"]
     if "@sha256:" in oci_ref:
         digest = "sha256:" + oci_ref.split("@sha256:")[-1]
@@ -2333,8 +2396,13 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
             if inspect.returncode == 0:
                 size_mb = int(inspect.stdout.strip()) / (1024 * 1024)
                 passed.append(f"Image size: {size_mb:.0f} MB")
-                if size_mb > 4096:
-                    warnings.append(f"Image is {size_mb:.0f} MB — consider optimizing (>4 GB)")
+                if size_mb > 2048:
+                    warnings.append(
+                        f"Image is {size_mb:.0f} MB — large images slow down session provisioning. "
+                        "Consider multi-stage builds, .dockerignore, or --no-cache-dir for pip."
+                    )
+                elif size_mb > 1024:
+                    warnings.append(f"Image is {size_mb:.0f} MB — consider optimizing if possible")
 
             digest_out = subprocess.run(
                 ["docker", "inspect", "--format", "{{.Id}}", tag],
@@ -2343,6 +2411,28 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
             if digest_out.returncode == 0:
                 digest = digest_out.stdout.strip()
                 _ok(f"  Image digest: {digest}")
+
+            # Validate USER directive: if Dockerfile specifies a non-root user,
+            # verify the image is configured to run as that user
+            user_directive = None
+            for line in df_content.splitlines():
+                stripped = line.strip()
+                if stripped.upper().startswith("USER ") and not stripped.startswith("#"):
+                    user_directive = stripped.split(None, 1)[1].strip()  # last USER wins
+            if user_directive:
+                user_inspect = subprocess.run(
+                    ["docker", "inspect", "--format", "{{.Config.User}}", tag],
+                    capture_output=True, text=True,
+                )
+                if user_inspect.returncode == 0:
+                    actual_user = user_inspect.stdout.strip()
+                    if actual_user and actual_user != "root" and actual_user != "0":
+                        passed.append(f"Container runs as non-root user: {actual_user}")
+                    elif not actual_user or actual_user in ("root", "0"):
+                        warnings.append(
+                            f"Dockerfile has USER {user_directive} but image runs as root — "
+                            "verify the USER directive is not overridden"
+                        )
 
     # ── 4. Protocol smoke test (if --test or --build) ─────────────
     if args.test and image_tag:
@@ -2583,6 +2673,197 @@ def cmd_env_verify(args: argparse.Namespace) -> None:
             ["docker", "rmi", image_tag],
             capture_output=True, timeout=30,
         )
+
+
+def cmd_env_test(args: argparse.Namespace) -> None:
+    """Run a local multi-step session against a containerized environment."""
+    import subprocess
+    import urllib.request
+
+    target = Path(args.directory or ".")
+    dockerfile = target / "Dockerfile"
+    tasks_path = target / "tasks.json"
+
+    if not dockerfile.exists():
+        _err("No Dockerfile found in the target directory.")
+        return
+    if not tasks_path.exists():
+        _err("No tasks.json found in the target directory.")
+        return
+
+    tasks = json.loads(tasks_path.read_text())
+    if not tasks:
+        _err("tasks.json is empty.")
+        return
+
+    task_id = args.task or tasks[0]["task_id"]
+    task = next((t for t in tasks if t["task_id"] == task_id), None)
+    if task is None:
+        _err(f"Task '{task_id}' not found in tasks.json. Available: {[t['task_id'] for t in tasks]}")
+        return
+
+    max_steps = args.steps or int(task.get("max_steps", 5))
+    _ok(f"Testing environment: {target.name}")
+    _ok(f"  Task:      {task_id}")
+    _ok(f"  Max steps: {max_steps}")
+
+    # Build image
+    tag = f"epsilab-test-{int(time.time())}"
+    _ok("\nBuilding Docker image...")
+    build = subprocess.run(
+        ["docker", "build", "-t", tag, "."],
+        cwd=str(target), capture_output=True, text=True, timeout=600,
+    )
+    if build.returncode != 0:
+        _err(f"Docker build failed:\n{build.stderr[-1000:]}")
+        return
+    _ok("  Build succeeded")
+
+    container_id = None
+    try:
+        run_result = subprocess.run(
+            ["docker", "run", "-d", "--rm", "-p", "127.0.0.1::8000", tag],
+            capture_output=True, text=True, timeout=30,
+        )
+        if run_result.returncode != 0:
+            _err(f"Failed to start container: {run_result.stderr}")
+            return
+        container_id = run_result.stdout.strip()
+
+        port_result = subprocess.run(
+            ["docker", "inspect", "--format",
+             '{{(index (index .NetworkSettings.Ports "8000/tcp") 0).HostPort}}',
+             container_id],
+            capture_output=True, text=True, timeout=15,
+        )
+        if port_result.returncode != 0 or not port_result.stdout.strip().isdigit():
+            _err("Could not resolve container port.")
+            return
+        base_url = f"http://127.0.0.1:{port_result.stdout.strip()}"
+
+        # Wait for health
+        _ok("  Waiting for container health...")
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                with urllib.request.urlopen(f"{base_url}/health", timeout=2):
+                    break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    _err("Environment did not become healthy within 60 seconds.")
+                    return
+                time.sleep(0.5)
+        _ok("  Container healthy")
+
+        # Reset
+        _ok(f"\n  POST /reset  task={task_id}")
+        reset_payload = json.dumps({"task_id": task_id, "seed": 42}).encode()
+        req = urllib.request.Request(
+            f"{base_url}/reset", data=reset_payload,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            reset_body = json.loads(resp.read())
+        if "observation" not in reset_body:
+            _err("POST /reset response missing 'observation'")
+            return
+        obs = reset_body["observation"]
+        _ok(f"    observation: {str(obs)[:200]}{'...' if len(str(obs)) > 200 else ''}")
+
+        # Extract tools from observation
+        tools: dict = {}
+        try:
+            obs_data = json.loads(obs) if isinstance(obs, str) else obs
+            if isinstance(obs_data, dict):
+                tools = obs_data.get("context", {}).get("tools", {})
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        if tools:
+            _ok(f"    tools: {', '.join(sorted(tools))}")
+
+        # Run steps
+        _TOOL_ACTIONS: dict[str, list[dict]] = {
+            "files": [
+                {"plugin": "browser", "method": "files.list", "args": {}},
+                {"plugin": "browser", "method": "files.write", "args": {
+                    "path": "index.html", "content": "<html><body><h1>Test</h1></body></html>"}},
+            ],
+            "preview": [
+                {"plugin": "browser", "method": "preview.screenshot", "args": {}},
+            ],
+            "audit": [
+                {"plugin": "browser", "method": "audit.performance", "args": {"url": "about:blank"}},
+            ],
+            "calendar": [
+                {"plugin": "calendar", "method": "calendars.list", "args": {}},
+            ],
+            "github": [
+                {"plugin": "github", "method": "repos.list", "args": {}},
+            ],
+        }
+
+        # Build a sequence of actions: use tool-specific ones if available, else generic
+        actions: list[dict] = []
+        for tool_name in sorted(tools):
+            tool_actions = _TOOL_ACTIONS.get(tool_name, [])
+            actions.extend(tool_actions)
+        if not actions:
+            actions.append({"content": "test step", "action_type": "submit"})
+
+        actions = actions[:max_steps]
+        steps_completed = 0
+        done = False
+
+        for step_idx, action in enumerate(actions):
+            method = action.get("method", action.get("action_type", "?"))
+            _ok(f"\n  step {step_idx + 1}/{len(actions)}  {method}")
+            step_req = urllib.request.Request(
+                f"{base_url}/step",
+                data=json.dumps({"action": action}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            try:
+                with urllib.request.urlopen(step_req, timeout=60) as resp:
+                    step_body = json.loads(resp.read())
+            except Exception as e:
+                _err(f"    Step failed: {e}")
+                break
+
+            steps_completed += 1
+            step_obs = str(step_body.get("observation", ""))[:200]
+            reward = step_body.get("reward")
+            step_done = step_body.get("done", False)
+            _ok(f"    reward={reward}  done={step_done}  obs_len={len(str(step_body.get('observation', '')))}")
+
+            if "error" in step_obs.lower():
+                try:
+                    err_data = json.loads(step_body.get("observation", ""))
+                    err_msg = err_data.get("error", step_obs)
+                except (json.JSONDecodeError, TypeError):
+                    err_msg = step_obs
+                _err(f"    Tool error: {err_msg}")
+                break
+
+            if step_done:
+                done = True
+                break
+
+        # Summary
+        print(f"\n{'=' * 60}")
+        _ok(f"  Steps completed: {steps_completed}/{len(actions)}")
+        if done:
+            _ok(f"  Session terminated: reward={reward}")
+        else:
+            _ok(f"  Session did not terminate (ran all {steps_completed} steps)")
+        print(f"{'=' * 60}")
+
+    finally:
+        if container_id:
+            subprocess.run(["docker", "stop", container_id], capture_output=True, timeout=15)
+            _ok("\n  Container stopped")
+    # Cleanup image
+    subprocess.run(["docker", "rmi", tag], capture_output=True, timeout=30)
 
 
 def cmd_env_init(args: argparse.Namespace) -> None:
@@ -3982,6 +4263,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Register the release without creating a hosted deployment",
     )
     deploy_p.add_argument("--yes", "-y", action="store_true", help="Skip prompts (use defaults)")
+    deploy_p.add_argument("--force", action="store_true", help="Force rebuild even if context unchanged")
     deploy_p.set_defaults(func=cmd_deploy)
 
     # ── env ──────────────────────────────────────────────────────
@@ -4020,6 +4302,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run a protocol smoke test (requires --build)",
     )
     verify_p.set_defaults(func=cmd_env_verify)
+
+    # env test
+    test_p = env_sub.add_parser(
+        "test",
+        help="Run a local multi-step session against a containerized environment",
+        description=(
+            "Builds the Docker image, starts the container, and runs a "
+            "multi-step session locally. Exercises each tool in the "
+            "observation to verify dependencies are installed and functional."
+        ),
+    )
+    test_p.add_argument(
+        "-d", "--directory", default=".",
+        help="Environment project directory (default: current)",
+    )
+    test_p.add_argument(
+        "--task", help="Task ID to test (default: first task in tasks.json)",
+    )
+    test_p.add_argument(
+        "--steps", type=int,
+        help="Max steps to run (default: from task max_steps)",
+    )
+    test_p.set_defaults(func=cmd_env_test)
 
     # env list
     list_p = env_sub.add_parser("list", help="List environment listings")
