@@ -3772,6 +3772,29 @@ class TestCreateQualityReport:
         assert captured["body"]["report_type"] == "full_qualification"
         assert captured["body"]["deployment_id"] == "dep-1"
 
+    def test_hosted_execution_accepts_smoke_config(self):
+        captured = {}
+
+        def handler(req):
+            captured["body"] = json.loads(req.content)
+            return _json_response(
+                {"report_id": "rpt-hosted", "status": "queued"}, status=202
+            )
+
+        client = _make_client(httpx.MockTransport(handler))
+        client.create_quality_report(
+            release_id="rel-1",
+            report_type="hosted_execution",
+            config={
+                "task_id": "task-1",
+                "smoke_actions": [{"content": "done", "action_type": "submit"}],
+                "repetitions": 3,
+                "seed": 0,
+            },
+        )
+        assert captured["body"]["report_type"] == "hosted_execution"
+        assert captured["body"]["config"]["task_id"] == "task-1"
+
     def test_rejects_unsupported_report_type_before_request(self):
         client = _make_client(httpx.MockTransport(lambda request: pytest.fail("unexpected request")))
         with pytest.raises(ValueError, match="report_type must be one of"):

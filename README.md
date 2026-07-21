@@ -201,6 +201,21 @@ reward from 0 through 1, including binary rewards. Set it to `"binary"` when
 every terminal reward is exactly 0 or 1, or `"partial_credit"` when fractional
 rewards represent completed rubric items.
 
+New projects also include a `qualification` block with a deterministic task and
+terminal smoke action. `epsilab deploy` publishes the immutable release first,
+then queues a hosted compatibility check for that exact release. Publication is
+not blocked by the check, but hosted sessions become available only after it
+passes. Inspect progress or retry explicitly:
+
+```bash
+epsilab env status <release-id>
+epsilab env qualify <release-id> --task <task-id> --action '<terminal action>'
+```
+
+For custom action schemas, set `qualification.smoke_actions` in
+`.epsilab/project.json` to one or more valid actions that deterministically end
+the selected task. A failed check does not hide the published listing.
+
 ### Environment protocol
 
 The generated server uses the OpenEnv contract and exposes:

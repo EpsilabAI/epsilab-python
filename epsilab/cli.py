@@ -669,6 +669,56 @@ def _environment_reward_mode(config: dict) -> str:
     return reward_mode
 
 
+def _environment_qualification_config(config: dict) -> dict[str, Any] | None:
+    """Validate the optional hosted qualification profile in project.json."""
+    raw = config.get("qualification")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("qualification must be an object")
+    unknown = set(raw) - {"enabled", "task_id", "smoke_actions", "repetitions", "seed"}
+    if unknown:
+        raise ValueError(
+            f"qualification has unsupported field(s): {', '.join(sorted(unknown))}"
+        )
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("qualification.enabled must be true or false")
+    if not enabled:
+        return None
+    task_id = raw.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 255:
+        raise ValueError("qualification.task_id must contain 1-255 characters")
+    actions = raw.get("smoke_actions")
+    if not isinstance(actions, list) or not 1 <= len(actions) <= 50:
+        raise ValueError("qualification.smoke_actions must contain 1-50 actions")
+    for action in actions:
+        if not isinstance(action, (str, dict)) or not action:
+            raise ValueError("qualification.smoke_actions must contain strings or objects")
+        try:
+            encoded = json.dumps(action, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("qualification.smoke_actions must contain finite JSON") from exc
+        if len(encoded.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("qualification smoke action is too large")
+    repetitions = raw.get("repetitions", 3)
+    if (
+        isinstance(repetitions, bool)
+        or not isinstance(repetitions, int)
+        or not 1 <= repetitions <= 20
+    ):
+        raise ValueError("qualification.repetitions must be an integer from 1 through 20")
+    seed = raw.get("seed", 0)
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**31 - 1:
+        raise ValueError("qualification.seed must be an integer from 0 through 2147483647")
+    return {
+        "task_id": task_id.strip(),
+        "smoke_actions": actions,
+        "repetitions": repetitions,
+        "seed": seed,
+    }
+
+
 def _docker_build_and_upload(
     client: EpsilabClient, directory: Path, image_tag: str,
     *, build_context: Path | None = None, build_args: dict | None = None,
@@ -1058,6 +1108,8 @@ def cmd_deploy(args: argparse.Namespace) -> None:
 
     except EpsilabError as e:
         _err(_friendly_error(e))
+    except ValueError as e:
+        _err(str(e))
     finally:
         client.close()
 
@@ -1265,6 +1317,9 @@ def _deploy_environment(
     listing_id = project["listing_id"]
     resource_policy = _environment_resource_policy(project)
     reward_mode = _environment_reward_mode(project)
+    qualification_config = (
+        _environment_qualification_config(project) if args.prod else None
+    )
 
     version = args.version or project.get("version") or "1.0.0"
     if is_interactive() and not args.yes and not args.version and not project.get("version"):
@@ -1483,6 +1538,29 @@ def _deploy_environment(
         release_id = ""
     status(f"Release: {release_id}", ok=True)
 
+    quality_report_id = ""
+    if qualification_config is not None:
+        step("Checking hosted compatibility")
+        try:
+            report = client.create_quality_report(
+                release_id=str(release_id),
+                report_type="hosted_execution",
+                config=qualification_config,
+                idempotency_key=_deterministic_idem_key(
+                    "hosted-quality",
+                    release_id=release_id,
+                    config=qualification_config,
+                ),
+            )
+            quality_report_id = str(report.get("report_id", ""))
+            status("Hosted qualification queued", ok=True)
+        except EpsilabError as exc:
+            _warn(
+                "The release was published, but hosted qualification could not be queued: "
+                f"{_friendly_error(exc)}\n"
+                f"  Retry with: epsilab env qualify {release_id}"
+            )
+
     deploy_id = ""
     if args.prod:
         step("Deploying")
@@ -1510,6 +1588,7 @@ def _deploy_environment(
             "version": version,
             "environment_release_id": release_id,
             "deployment_id": deploy_id or project.get("deployment_id", ""),
+            "quality_report_id": quality_report_id or project.get("quality_report_id", ""),
         }
     )
     try:
@@ -1528,12 +1607,17 @@ def _deploy_environment(
     _ok(f"  Release:  {release_id}")
     _ok(f"  Tasks:    {len(members)}")
     if args.prod:
-        _ok("  Status:   Live")
+        _ok("  Status:   Published")
+        if quality_report_id:
+            _ok("  Hosting:  Qualification queued")
+            _ok(f"  Check:    epsilab env status {release_id}")
         owner = project.get("namespace") or project.get("namespace_slug")
         if owner:
-            _ok(f"  Run it:   epsilab run {owner}/{project['slug']}")
+            label = "Run after qualification" if quality_report_id else "Run it"
+            _ok(f"  {label}: epsilab run {owner}/{project['slug']}")
         else:
-            _ok(f"  Run it:   epsilab run <owner>/{project['slug']}")
+            label = "Run after qualification" if quality_report_id else "Run it"
+            _ok(f"  {label}: epsilab run <owner>/{project['slug']}")
     else:
         _ok("\n  Run with --prod to deploy for hosted execution.")
 
@@ -1885,11 +1969,34 @@ def cmd_env_status(args: argparse.Namespace) -> None:
         _ok(f"Release: {release.release_id}")
         _ok(f"  version: {release.release_version}")
         _ok(f"  protocol: {release.protocol_version}")
-        _ok(f"  status: {release.status}")
+        _ok(f"  publication: {release.status}")
         if release.content_digest:
             _ok(f"  digest: {release.content_digest}")
         if release.created_at:
             _ok(f"  created: {release.created_at}")
+
+        reports = client.list_quality_reports(
+            release_id=args.release_id,
+            report_type="hosted_execution",
+            limit=1,
+        )
+        if reports:
+            report = reports[0]
+            hosted_status = report.get("hosted_qualification_status")
+            if not hosted_status:
+                if report.get("status") in {"queued", "running", "failed"}:
+                    hosted_status = report["status"]
+                elif report.get("status") == "completed" and report.get("fail_count") == 0:
+                    hosted_status = "qualified"
+                else:
+                    hosted_status = "failed"
+            _ok(f"  hosted execution: {hosted_status}")
+            if report.get("hosted_qualification_expires_at"):
+                _ok(f"  qualification expires: {report['hosted_qualification_expires_at']}")
+            if hosted_status == "failed" and report.get("error_code"):
+                _ok(f"  qualification error: {report['error_code']}")
+        else:
+            _ok("  hosted execution: not requested")
 
         badges = client.list_quality_badges(release_id=args.release_id, limit=10)
         if badges:
@@ -1908,9 +2015,42 @@ def cmd_env_status(args: argparse.Namespace) -> None:
 def cmd_env_qualify(args: argparse.Namespace) -> None:
     client = _get_client()
     try:
+        config: dict[str, Any] | None = None
+        if args.report_type == "hosted_execution":
+            project = _load_project(Path.cwd()) or {}
+            config = _environment_qualification_config(project)
+            if args.action:
+                config = dict(config or {})
+                config["smoke_actions"] = [
+                    json.loads(_encode_environment_action(value, action_type=args.action_type))
+                    for value in args.action
+                ]
+            if args.task:
+                config = dict(config or {})
+                config["task_id"] = args.task
+            if args.repetitions is not None:
+                config = dict(config or {})
+                config["repetitions"] = args.repetitions
+            if args.seed is not None:
+                config = dict(config or {})
+                config["seed"] = args.seed
+            if not config or not config.get("task_id") or not config.get("smoke_actions"):
+                raise ValueError(
+                    "Hosted qualification needs a task and terminal smoke action. "
+                    "Run from a project created by 'epsilab init', or pass --task and --action."
+                )
+            config = _environment_qualification_config({"qualification": config})
+
         report = client.create_quality_report(
             release_id=args.release_id,
             report_type=args.report_type,
+            config=config,
+            idempotency_key=_deterministic_idem_key(
+                "hosted-quality" if args.report_type == "hosted_execution" else "quality",
+                release_id=args.release_id,
+                report_type=args.report_type,
+                config=config or {},
+            ),
         )
         _ok(f"Quality report started: {report.get('report_id', '?')}")
         _ok(f"  type: {args.report_type}")
@@ -1919,6 +2059,8 @@ def cmd_env_qualify(args: argparse.Namespace) -> None:
         _ok(f"  epsilab env status {args.release_id}")
     except EpsilabError as e:
         _err(_friendly_error(e))
+    except ValueError as e:
+        _err(str(e))
     finally:
         client.close()
 
@@ -3054,6 +3196,14 @@ def cmd_env_init(args: argparse.Namespace) -> None:
             "version": "1.0.0",
             "visibility": "public",
             "reward_mode": "continuous",
+            "qualification": {
+                "task_id": f"{slug}-easy-train-001",
+                "smoke_actions": [
+                    {"content": "hello epsilab", "action_type": "submit"}
+                ],
+                "repetitions": 3,
+                "seed": 0,
+            },
             "resource_policy": dict(_DEFAULT_ENVIRONMENT_RESOURCE_POLICY),
             "namespace_id": "",
             "listing_id": "",
@@ -4578,10 +4728,24 @@ def build_parser() -> argparse.ArgumentParser:
             "adversarial",
             "contamination",
             "benchmark",
+            "hosted_execution",
             "full_qualification",
         ],
-        default="full_qualification",
+        default="hosted_execution",
     )
+    qualify_p.add_argument("--task", help="Task ID used by the hosted smoke check")
+    qualify_p.add_argument(
+        "--action",
+        action="append",
+        help="Terminal smoke action (plain text or a JSON object; repeatable)",
+    )
+    qualify_p.add_argument(
+        "--action-type",
+        default="submit",
+        help="Action type for plain-text --action values (default: submit)",
+    )
+    qualify_p.add_argument("--repetitions", type=int, choices=range(1, 21))
+    qualify_p.add_argument("--seed", type=int)
     qualify_p.set_defaults(func=cmd_env_qualify)
 
     # env publish

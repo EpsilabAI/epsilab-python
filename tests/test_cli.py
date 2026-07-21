@@ -22,6 +22,7 @@ from epsilab.cli import (
     _default_environment_smoke_action,
     _environment_horizon_errors,
     _environment_plugin_slugs,
+    _environment_qualification_config,
     _environment_resource_policy,
     _environment_reward_mode,
     _get_client,
@@ -341,6 +342,14 @@ class TestEnvInit:
         assert project["listing_id"] == ""
         assert project["namespace_id"] == ""
         assert project["version"] == "1.0.0"
+        assert project["qualification"] == {
+            "task_id": "test-env-easy-train-001",
+            "smoke_actions": [
+                {"content": "hello epsilab", "action_type": "submit"}
+            ],
+            "repetitions": 3,
+            "seed": 0,
+        }
         assert project["resource_policy"] == {
             "cpu_millis": 1000,
             "memory_bytes": 512 * 1024 * 1024,
@@ -361,6 +370,25 @@ class TestEnvInit:
     def test_rejects_invalid_resource_policy(self, policy, message):
         with pytest.raises(ValueError, match=message):
             _environment_resource_policy({"resource_policy": policy})
+
+    @pytest.mark.parametrize(
+        ("qualification", "message"),
+        [
+            ({"enabled": "yes"}, "enabled"),
+            ({"task_id": "task", "smoke_actions": []}, "smoke_actions"),
+            (
+                {"task_id": "task", "smoke_actions": ["done"], "repetitions": 0},
+                "repetitions",
+            ),
+            (
+                {"task_id": "task", "smoke_actions": ["done"], "seed": -1},
+                "seed",
+            ),
+        ],
+    )
+    def test_rejects_invalid_qualification_profile(self, qualification, message):
+        with pytest.raises(ValueError, match=message):
+            _environment_qualification_config({"qualification": qualification})
 
     def test_refuses_nonempty_dir(self, tmp_path):
         target = tmp_path / "existing"
@@ -487,6 +515,8 @@ class TestEnvStatus:
             call_count += 1
             if "quality-badges" in req.url.path:
                 return _json_response([{"badge_type": "gold", "status": "active"}])
+            if "quality-reports" in req.url.path:
+                return _json_response([])
             return _json_response(
                 {
                     "release_id": "rel-1",
@@ -1001,13 +1031,31 @@ class TestEnvQualify:
 
         client = _mock_client(handler)
         with patch("epsilab.cli._get_client", return_value=client):
-            main(["env", "qualify", "rel-1"])
+            main(
+                [
+                    "env",
+                    "qualify",
+                    "rel-1",
+                    "--task",
+                    "task-1",
+                    "--action",
+                    "correct answer",
+                ]
+            )
 
         out = capsys.readouterr().out
         assert "rpt-1" in out
-        assert "full_qualification" in out
-        assert captured["body"]["report_type"] == "full_qualification"
+        assert "hosted_execution" in out
+        assert captured["body"]["report_type"] == "hosted_execution"
         assert captured["body"]["release_id"] == "rel-1"
+        assert captured["body"]["config"] == {
+            "task_id": "task-1",
+            "smoke_actions": [
+                {"action_type": "submit", "content": "correct answer"}
+            ],
+            "repetitions": 3,
+            "seed": 0,
+        }
 
     def test_with_report_type(self, capsys):
         captured = {}
@@ -1024,6 +1072,75 @@ class TestEnvQualify:
 
         out = capsys.readouterr().out
         assert "benchmark" in out
+
+    def test_uses_scaffolded_project_profile(self, tmp_path, monkeypatch):
+        target = tmp_path / "qualified-env"
+        init_args = build_parser().parse_args(
+            ["init", "qualified-env", "--directory", str(target)]
+        )
+        cmd_env_init(init_args)
+        monkeypatch.chdir(target)
+        captured = {}
+
+        def handler(req):
+            captured["body"] = json.loads(req.content) if req.content else {}
+            return _json_response(
+                {"report_id": "rpt-project", "status": "queued"}, status=202
+            )
+
+        client = _mock_client(handler)
+        with patch("epsilab.cli._get_client", return_value=client):
+            main(["env", "qualify", "rel-project"])
+
+        assert captured["body"]["config"] == {
+            "task_id": "qualified-env-easy-train-001",
+            "smoke_actions": [
+                {"content": "hello epsilab", "action_type": "submit"}
+            ],
+            "repetitions": 3,
+            "seed": 0,
+        }
+
+
+class TestHostedQualificationStatus:
+    def test_displays_current_hosted_qualification_without_signing_details(self, capsys):
+        class Client:
+            def get_environment_release(self, _release_id):
+                return SimpleNamespace(
+                    release_id="rel-1",
+                    release_version="1.0.0",
+                    protocol_version="0.4.1",
+                    status="qualified",
+                    content_digest="sha256:" + "a" * 64,
+                    created_at=None,
+                )
+
+            def list_quality_reports(self, **_kwargs):
+                return [
+                    {
+                        "report_id": "rpt-1",
+                        "status": "completed",
+                        "fail_count": 0,
+                        "hosted_qualification_status": "qualified",
+                        "hosted_qualification_expires_at": "2026-10-01T00:00:00Z",
+                        "key_id": "must-not-display",
+                    }
+                ]
+
+            def list_quality_badges(self, **_kwargs):
+                return []
+
+            def close(self):
+                return None
+
+        with patch("epsilab.cli._get_client", return_value=Client()):
+            main(["env", "status", "rel-1"])
+
+        out = capsys.readouterr().out
+        assert "publication: qualified" in out
+        assert "hosted execution: qualified" in out
+        assert "qualification expires: 2026-10-01T00:00:00Z" in out
+        assert "must-not-display" not in out
 
 
 class TestEnvPush:
@@ -1150,6 +1267,8 @@ class TestEnvStatusNoBadges:
     def test_no_badges(self, capsys):
         def handler(req):
             if "quality-badges" in req.url.path:
+                return _json_response([])
+            if "quality-reports" in req.url.path:
                 return _json_response([])
             return _json_response(
                 {
@@ -2024,6 +2143,12 @@ class TestRootDeployCommand:
                     },
                     status=201,
                 )
+            if req.method == "POST" and req.url.path == "/v1/environment-quality-reports":
+                captured["quality_body"] = json.loads(req.content)
+                return _json_response(
+                    {"report_id": "quality-1", "status": "queued"},
+                    status=202,
+                )
             if req.method == "POST" and req.url.path == "/v1/environment-deployments":
                 return _json_response({"deployment_id": "dep-1"}, status=201)
             if req.method == "GET" and req.url.path == "/v1/environment-listings/lst-new":
@@ -2049,9 +2174,16 @@ class TestRootDeployCommand:
         assert captured["listing_body"]["visibility"] == "unlisted"
         assert captured["verifier_body"]["reward_mode"] == "continuous"
         assert captured["environment_body"]["resource_policy"] == project_config["resource_policy"]
+        assert captured["quality_body"] == {
+            "release_id": "rel-1",
+            "report_type": "hosted_execution",
+            "config": project_config["qualification"],
+        }
+        assert project["quality_report_id"] == "quality-1"
         assert ("POST", "/v1/environment-deployments") in captured["paths"]
         output = capsys.readouterr().out
         assert "Deployed demo-env@1.0.0" in output
+        assert "Hosting:  Qualification queued" in output
         assert "epsilab run epsilab/demo-env" in output
 
 

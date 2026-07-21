@@ -75,6 +75,7 @@ _QUALITY_REPORT_TYPES = frozenset(
         "adversarial",
         "contamination",
         "benchmark",
+        "hosted_execution",
         "full_qualification",
     }
 )
@@ -4480,8 +4481,8 @@ class EpsilabClient:
             release_id: Release to evaluate.
             report_type: One of ``protocol_conformance``, ``startup_cleanup``,
                 ``reset_independence``, ``verifier_repeatability``,
-                ``adversarial``, ``contamination``, ``benchmark``, or
-                ``full_qualification``.
+                ``adversarial``, ``contamination``, ``benchmark``,
+                ``hosted_execution``, or ``full_qualification``.
             deployment_id: Optional deployment to test against.
             config: Optional report configuration.
             idempotency_key: Unique key for at-most-once delivery.
