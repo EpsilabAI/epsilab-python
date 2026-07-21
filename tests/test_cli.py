@@ -19,6 +19,7 @@ from epsilab.cli import (
     _deploy_environment,
     _docker_build_and_upload,
     _encode_environment_action,
+    _default_environment_smoke_action,
     _environment_horizon_errors,
     _environment_plugin_slugs,
     _environment_resource_policy,
@@ -27,6 +28,7 @@ from epsilab.cli import (
     _normalize_cli_argv,
     _platform_openenv_max_steps,
     _public_step_info,
+    _resolve_listing,
     _resolve_environment_task,
     _resolve_tool_bindings,
     _load_config,
@@ -94,6 +96,17 @@ class TestParser:
         output = capsys.readouterr().out
         assert "Release version (default: 1.0.0)" in output
         assert "epsilab deploy --no-host" in output
+
+    def test_deploy_accepts_listing_visibility(self):
+        args = build_parser().parse_args(["deploy", "--visibility", "unlisted"])
+        assert args.visibility == "unlisted"
+
+    def test_environment_visibility_command(self):
+        args = build_parser().parse_args([
+            "env", "visibility", "epsilab/demo", "private",
+        ])
+        assert args.target == "epsilab/demo"
+        assert args.visibility == "private"
 
     def test_public_run_syntax_is_normalized_without_affecting_run_subcommands(self):
         assert _normalize_cli_argv(["run", "epsilab/bug-hunter", "--action", "x"]) == [
@@ -239,6 +252,24 @@ class TestParser:
         )
         assert args.display_name == "My Name"
         assert args.bio == "hello"
+
+
+class TestEnvironmentSmokeAction:
+    def test_uses_explicit_smoke_action(self):
+        action = {"tool": "submit", "input": {"answer": 42}}
+        assert _default_environment_smoke_action({"smoke_action": action}) == action
+
+    def test_uses_exact_answer_for_text_task(self):
+        assert _default_environment_smoke_action({"expected_answer": "hello epsilab"}) == {
+            "content": "hello epsilab",
+            "action_type": "submit",
+        }
+
+    def test_falls_back_to_protocol_probe(self):
+        assert _default_environment_smoke_action({}) == {
+            "content": "test step",
+            "action_type": "submit",
+        }
 
 
 class TestConfigFile:
@@ -762,6 +793,89 @@ class TestEnvCreate:
             ])
 
         assert captured["body"]["visibility"] == "public"
+
+
+class TestEnvVisibility:
+    def test_explicit_deploy_visibility_updates_rediscovered_listing(self):
+        existing = SimpleNamespace(
+            listing_id="lst-1",
+            namespace_id="ns-1",
+            namespace="epsilab",
+            slug="demo-env",
+            title="Demo Environment",
+            visibility="public",
+            revision=7,
+        )
+        captured = {}
+
+        class Client:
+            def list_environment_listings(self, **_kwargs):
+                return [existing]
+
+            def update_listing(self, listing_id, **kwargs):
+                captured["listing_id"] = listing_id
+                captured["kwargs"] = kwargs
+                return SimpleNamespace(**{
+                    **vars(existing),
+                    "visibility": kwargs["visibility"],
+                    "revision": 8,
+                })
+
+            def create_listing(self, **_kwargs):
+                raise AssertionError("existing listing should be reused")
+
+        result = _resolve_listing(
+            Client(),
+            "ns-1",
+            "demo-env",
+            "Demo Environment",
+            "",
+            visibility="unlisted",
+            enforce_visibility=True,
+        )
+
+        assert result.visibility == "unlisted"
+        assert captured == {
+            "listing_id": "lst-1",
+            "kwargs": {"expected_revision": 7, "visibility": "unlisted"},
+        }
+
+    def test_updates_listing_without_database_access(self, capsys):
+        captured = {}
+        listing = {
+            "listing_id": "lst-1",
+            "namespace_id": "ns-1",
+            "namespace": "epsilab",
+            "slug": "demo-env",
+            "title": "Demo Environment",
+            "visibility": "unlisted",
+            "listing_revision": 3,
+            "is_owner": True,
+        }
+
+        def handler(req):
+            if req.method == "GET" and req.url.path == "/v1/environment-listings/lst-1":
+                return _json_response(listing)
+            if req.method == "PATCH" and req.url.path == "/v1/environment-listings/lst-1":
+                captured["body"] = json.loads(req.content)
+                return _json_response({
+                    **listing,
+                    "visibility": captured["body"]["visibility"],
+                    "listing_revision": 4,
+                })
+            raise AssertionError(f"unexpected request: {req.method} {req.url.path}")
+
+        client = _mock_client(handler)
+        with patch("epsilab.cli._get_client", return_value=client):
+            main(["env", "visibility", "lst-1", "private"])
+
+        assert captured["body"] == {
+            "expected_revision": 3,
+            "visibility": "private",
+        }
+        output = capsys.readouterr().out
+        assert "Visibility updated: epsilab/demo-env" in output
+        assert "visible only to your organization" in output
 
 
 class TestEnvGrant:
@@ -1790,7 +1904,7 @@ class TestRootDeployCommand:
             "runtime_interface": "openenv",
         }
         project_file.write_text(json.dumps(project_config))
-        captured = {"paths": [], "environment_body": None}
+        captured = {"paths": [], "environment_body": None, "listing_body": None}
 
         existing_listing = {
             "listing_id": "lst-existing",
@@ -1827,7 +1941,11 @@ class TestRootDeployCommand:
             if req.method == "GET" and req.url.path == "/v1/application-tools":
                 return _json_response([])
             if req.method == "POST" and req.url.path == "/v1/environment-listings":
-                return _json_response(deployed_listing, status=201)
+                captured["listing_body"] = json.loads(req.content)
+                return _json_response({
+                    **deployed_listing,
+                    "visibility": captured["listing_body"]["visibility"],
+                }, status=201)
             if req.method == "POST" and req.url.path == "/v1/tasks":
                 return _json_response({"task_id": "demo-env-easy-train-001"}, status=201)
             if req.method == "POST" and req.url.path == "/v1/task-pack-releases":
@@ -1861,12 +1979,14 @@ class TestRootDeployCommand:
             patch("epsilab.cli._get_client", return_value=client),
             patch("epsilab.cli._docker_build_and_upload", return_value=upload),
         ):
-            main(["deploy", str(target), "--yes"])
+            main(["deploy", str(target), "--yes", "--visibility", "unlisted"])
 
         project = json.loads((target / ".epsilab" / "project.json").read_text())
         assert project["namespace_id"] == "ns-1"
         assert project["listing_id"] == "lst-new"
         assert project["deployment_id"] == "dep-1"
+        assert project["visibility"] == "unlisted"
+        assert captured["listing_body"]["visibility"] == "unlisted"
         assert captured["environment_body"]["resource_policy"] == project_config["resource_policy"]
         assert ("POST", "/v1/environment-deployments") in captured["paths"]
         output = capsys.readouterr().out

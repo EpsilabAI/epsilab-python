@@ -816,6 +816,8 @@ def _resolve_listing(
     summary: str,
     domain: Optional[str] = None,
     tags: Optional[list[str]] = None,
+    visibility: str = "public",
+    enforce_visibility: bool = False,
 ) -> Any:
     """Find an existing listing by slug or create a new one."""
     listings = client.list_environment_listings(limit=100)
@@ -825,23 +827,28 @@ def _resolve_listing(
     )
     if existing:
         _ok(f"  Found existing listing: {existing.slug} ({existing.listing_id[:8]}...)")
-        if domain or tags:
+        updates: dict[str, Any] = {}
+        if domain:
+            updates["domain"] = domain
+        if tags:
+            updates["tags"] = tags
+        if enforce_visibility and existing.visibility != visibility:
+            updates["visibility"] = visibility
+        if updates:
             try:
-                rev = getattr(existing, "revision", None) or 1
-                client.update_listing(
+                existing = client.update_listing(
                     existing.listing_id,
-                    expected_revision=rev,
-                    domain=domain,
-                    tags=tags,
+                    expected_revision=existing.revision,
+                    **updates,
                 )
-                _ok(f"  Updated listing metadata (domain={domain})")
-            except Exception:
-                pass
+                _ok("  Updated listing: " + ", ".join(sorted(updates)))
+            except EpsilabError as exc:
+                _warn(f"  Could not update existing listing: {_friendly_error(exc)}")
         return existing
     try:
         listing = client.create_listing(
             namespace_id=namespace_id, slug=slug,
-            title=title, summary=summary, visibility="public",
+            title=title, summary=summary, visibility=visibility,
             domain=domain, tags=tags,
         )
         _ok(f"  Created listing: {listing.slug}")
@@ -920,6 +927,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
             info("Warning: no tasks.json found — release will have no tasks")
 
     project = _load_project(directory)
+    existing_listing_id = (project or {}).get("listing_id")
     client = _get_client()
     try:
         if project:
@@ -962,6 +970,12 @@ def cmd_deploy(args: argparse.Namespace) -> None:
                     client, namespace_id, slug, title, summary,
                     domain=(project or {}).get("domain"),
                     tags=(project or {}).get("tags"),
+                    visibility=(
+                        getattr(args, "visibility", None)
+                        or (project or {}).get("visibility")
+                        or "public"
+                    ),
+                    enforce_visibility=bool(getattr(args, "visibility", None)),
                 )
                 project = {
                     **(project or {}),
@@ -970,6 +984,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
                     "namespace_id": namespace_id,
                     "slug": listing.slug,
                     "title": listing.title,
+                    "visibility": listing.visibility,
                     "namespace": listing.namespace or (project or {}).get("namespace", ""),
                 }
             _save_project(directory, project)
@@ -988,6 +1003,8 @@ def cmd_deploy(args: argparse.Namespace) -> None:
                 project.get("summary", ""),
                 domain=project.get("domain"),
                 tags=project.get("tags"),
+                visibility=getattr(args, "visibility", None) or project.get("visibility") or "public",
+                enforce_visibility=bool(getattr(args, "visibility", None)),
             )
             project.update(
                 {
@@ -995,11 +1012,28 @@ def cmd_deploy(args: argparse.Namespace) -> None:
                     "listing_id": listing.listing_id,
                     "slug": listing.slug,
                     "title": listing.title,
+                    "visibility": listing.visibility,
                     "namespace": listing.namespace or project.get("namespace", ""),
                 }
             )
             _save_project(directory, project)
             _ok("  Saved listing to .epsilab/project.json")
+
+        if (
+            project_type == "environment"
+            and existing_listing_id
+            and getattr(args, "visibility", None)
+        ):
+            listing = client.get_environment_listing(existing_listing_id)
+            if listing.visibility != args.visibility:
+                listing = client.update_listing(
+                    existing_listing_id,
+                    expected_revision=listing.revision,
+                    visibility=args.visibility,
+                )
+                _ok(f"  Visibility: {listing.visibility}")
+            project["visibility"] = listing.visibility
+            _save_project(directory, project)
 
         namespace_id = project["namespace_id"]
 
@@ -1744,6 +1778,55 @@ def cmd_env_revoke(args: argparse.Namespace) -> None:
             _ok(f"  environment: {env_title}")
     except EpsilabError as e:
         _err(_friendly_error(e))
+    finally:
+        client.close()
+
+
+def _resolve_listing_for_update(client: EpsilabClient, target: str) -> Any:
+    """Resolve a creator listing by ID or exact owner/name."""
+    if "/" not in target:
+        return client.get_environment_listing(target)
+    if target.count("/") != 1:
+        raise ValueError("Environment must be a listing ID or <owner>/<name>.")
+    owner, slug = (part.strip().lower() for part in target.split("/", 1))
+    if not owner or not slug:
+        raise ValueError("Environment must be a listing ID or <owner>/<name>.")
+    matches = [
+        listing
+        for listing in client.list_environment_listings(limit=100)
+        if listing.slug.lower() == slug
+        and (listing.namespace or "").lower() == owner
+        and listing.is_owner
+    ]
+    if not matches:
+        raise ValueError(f"Owned environment '{target}' was not found.")
+    if len(matches) > 1:
+        raise ValueError(f"Owned environment '{target}' is ambiguous; use its listing ID.")
+    return matches[0]
+
+
+def cmd_env_visibility(args: argparse.Namespace) -> None:
+    """Change how a creator listing is exposed on the hub."""
+    client = _get_client()
+    try:
+        listing = _resolve_listing_for_update(client, args.target)
+        if listing.visibility == args.visibility:
+            updated = listing
+        else:
+            updated = client.update_listing(
+                listing.listing_id,
+                expected_revision=listing.revision,
+                visibility=args.visibility,
+            )
+        if args.json:
+            _json_out(updated.to_dict())
+        else:
+            _ok(f"Visibility updated: {updated.namespace or '?'}/{updated.slug}")
+            _ok(f"  visibility: {updated.visibility}")
+            if updated.visibility == "private":
+                _ok("  The environment is now visible only to your organization.")
+    except (EpsilabError, ValueError) as exc:
+        _err(_friendly_error(exc))
     finally:
         client.close()
 
@@ -2842,7 +2925,7 @@ def cmd_env_test(args: argparse.Namespace) -> None:
             tool_actions = _TOOL_ACTIONS.get(tool_name, [])
             actions.extend(tool_actions)
         if not actions:
-            actions.append({"content": "test step", "action_type": "submit"})
+            actions.append(_default_environment_smoke_action(task))
 
         actions = actions[:max_steps]
         steps_completed = 0
@@ -2897,6 +2980,17 @@ def cmd_env_test(args: argparse.Namespace) -> None:
             _ok("\n  Container stopped")
     # Cleanup image
     subprocess.run(["docker", "rmi", tag], capture_output=True, timeout=30)
+
+
+def _default_environment_smoke_action(task: dict[str, Any]) -> dict[str, Any]:
+    """Return a deterministic local smoke action for a task without tools."""
+    configured = task.get("smoke_action")
+    if isinstance(configured, dict) and configured:
+        return dict(configured)
+    expected = task.get("expected_answer")
+    if isinstance(expected, (str, int, float, bool)):
+        return {"content": str(expected), "action_type": "submit"}
+    return {"content": "test step", "action_type": "submit"}
 
 
 def cmd_env_init(args: argparse.Namespace) -> None:
@@ -4284,6 +4378,11 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_p.add_argument("--version", help="Release version (default: 1.0.0)")
     deploy_p.add_argument("--namespace-id", help="Namespace ID (skips namespace selection)")
     deploy_p.add_argument(
+        "--visibility",
+        choices=["private", "unlisted", "shared", "public"],
+        help="Visibility for a new listing, or update an existing linked listing",
+    )
+    deploy_p.add_argument(
         "--prod",
         dest="prod",
         action="store_true",
@@ -4433,6 +4532,19 @@ def build_parser() -> argparse.ArgumentParser:
     # env shared (list shared environments)
     shared_p = env_sub.add_parser("shared", help="List shared environments")
     shared_p.set_defaults(func=cmd_env_shared)
+
+    # env visibility
+    visibility_p = env_sub.add_parser(
+        "visibility",
+        help="Change an environment's hub visibility",
+    )
+    visibility_p.add_argument("target", help="Listing ID or <owner>/<name>")
+    visibility_p.add_argument(
+        "visibility",
+        choices=["private", "unlisted", "shared", "public"],
+    )
+    visibility_p.add_argument("--json", action="store_true", help="Output as JSON")
+    visibility_p.set_defaults(func=cmd_env_visibility)
 
     # env status
     status_p = env_sub.add_parser("status", help="Show release status and quality")
