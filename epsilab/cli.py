@@ -45,6 +45,13 @@ _DASHBOARD_URL = "https://app.epsilab.com"
 _DOCS_URL = "https://app.epsilab.com"
 _MAX_LOCAL_OPENENV_STEPS = 10_000
 _LEGACY_PLATFORM_OPENENV_STEPS = 200
+_DEFAULT_ENVIRONMENT_RESOURCE_POLICY = {
+    "cpu_millis": 1000,
+    "memory_bytes": 512 * 1024 * 1024,
+    "architecture": "amd64",
+    "network_policy": "deny",
+    "runtime_interface": "openenv",
+}
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -620,6 +627,35 @@ def _save_project(directory: Path, project: dict) -> None:
         gitignore.write_text("# managed by epsilab cli\nproject.json\n.build_hash\n.build_info.json\n")
 
 
+def _environment_resource_policy(config: dict) -> dict:
+    raw = config.get("resource_policy")
+    if raw is None:
+        return dict(_DEFAULT_ENVIRONMENT_RESOURCE_POLICY)
+    if not isinstance(raw, dict):
+        raise ValueError("resource_policy must be an object")
+    unknown = set(raw) - set(_DEFAULT_ENVIRONMENT_RESOURCE_POLICY)
+    if unknown:
+        raise ValueError(f"resource_policy has unsupported field(s): {', '.join(sorted(unknown))}")
+    policy = {**_DEFAULT_ENVIRONMENT_RESOURCE_POLICY, **raw}
+    cpu_millis = policy["cpu_millis"]
+    memory_bytes = policy["memory_bytes"]
+    if isinstance(cpu_millis, bool) or not isinstance(cpu_millis, int) or not 100 <= cpu_millis <= 64_000:
+        raise ValueError("resource_policy.cpu_millis must be an integer between 100 and 64000")
+    if (
+        isinstance(memory_bytes, bool)
+        or not isinstance(memory_bytes, int)
+        or not 64 * 1024 * 1024 <= memory_bytes <= 256 * 1024 * 1024 * 1024
+    ):
+        raise ValueError("resource_policy.memory_bytes must be an integer between 64 MiB and 256 GiB")
+    if policy["architecture"] not in {"amd64", "arm64"}:
+        raise ValueError("resource_policy.architecture must be amd64 or arm64")
+    if policy["network_policy"] not in {"deny", "egress_allowlist"}:
+        raise ValueError("resource_policy.network_policy is unsupported")
+    if policy["runtime_interface"] not in {"foundation_native", "openenv"}:
+        raise ValueError("resource_policy.runtime_interface must be foundation_native or openenv")
+    return policy
+
+
 def _docker_build_and_upload(
     client: EpsilabClient, directory: Path, image_tag: str,
     *, build_context: Path | None = None, build_args: dict | None = None,
@@ -1181,6 +1217,7 @@ def _deploy_environment(
 ) -> None:
     """Build, upload, and register an environment release."""
     listing_id = project["listing_id"]
+    resource_policy = _environment_resource_policy(project)
 
     version = args.version or project.get("version") or "1.0.0"
     if is_interactive() and not args.yes and not args.version and not project.get("version"):
@@ -1382,11 +1419,7 @@ def _deploy_environment(
             verifier_release_id=ver_release_id,
             action_schema_digest=source_digest,
             observation_schema_digest=source_digest,
-            resource_policy={
-                "cpu_millis": 2000, "memory_bytes": 512 * 1024 * 1024,
-                "architecture": "amd64", "network_policy": "deny",
-                "runtime_interface": "openenv",
-            },
+            resource_policy=resource_policy,
             application_tools=tool_bindings or None,
             idempotency_key=env_idem,
         )
@@ -1591,7 +1624,7 @@ def cmd_env_push(args: argparse.Namespace) -> None:
         ver_release_id = str(ver.get("release_id", ver.get("id", "")))
         env_action_schema = env_config.get("action_schema_digest", "")
         env_obs_schema = env_config.get("observation_schema_digest", "")
-        env_resource_policy = env_config.get("resource_policy")
+        env_resource_policy = _environment_resource_policy(env_config)
 
         push_plugin_slugs = manifest.get("plugins", env_config.get("plugins", []))
         push_tool_bindings = _resolve_tool_bindings(client, push_plugin_slugs) if push_plugin_slugs else []
@@ -2914,6 +2947,7 @@ def cmd_env_init(args: argparse.Namespace) -> None:
             "summary": "A deterministic OpenEnv environment.",
             "version": "1.0.0",
             "visibility": "public",
+            "resource_policy": dict(_DEFAULT_ENVIRONMENT_RESOURCE_POLICY),
             "namespace_id": "",
             "listing_id": "",
         },

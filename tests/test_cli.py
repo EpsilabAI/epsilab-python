@@ -21,6 +21,7 @@ from epsilab.cli import (
     _encode_environment_action,
     _environment_horizon_errors,
     _environment_plugin_slugs,
+    _environment_resource_policy,
     _get_client,
     _interactive_action,
     _normalize_cli_argv,
@@ -281,6 +282,26 @@ class TestEnvInit:
         assert project["listing_id"] == ""
         assert project["namespace_id"] == ""
         assert project["version"] == "1.0.0"
+        assert project["resource_policy"] == {
+            "cpu_millis": 1000,
+            "memory_bytes": 512 * 1024 * 1024,
+            "architecture": "amd64",
+            "network_policy": "deny",
+            "runtime_interface": "openenv",
+        }
+
+    @pytest.mark.parametrize(
+        ("policy", "message"),
+        [
+            ({"cpu_millis": True}, "cpu_millis"),
+            ({"memory_bytes": 1024}, "memory_bytes"),
+            ({"architecture": "x86"}, "architecture"),
+            ({"unknown": 1}, "unsupported field"),
+        ],
+    )
+    def test_rejects_invalid_resource_policy(self, policy, message):
+        with pytest.raises(ValueError, match=message):
+            _environment_resource_policy({"resource_policy": policy})
 
     def test_refuses_nonempty_dir(self, tmp_path):
         target = tmp_path / "existing"
@@ -1759,6 +1780,16 @@ class TestRootDeployCommand:
         target = tmp_path / "demo-env"
         init_args = build_parser().parse_args(["init", "demo-env", "-d", str(target)])
         cmd_env_init(init_args)
+        project_file = target / ".epsilab" / "project.json"
+        project_config = json.loads(project_file.read_text())
+        project_config["resource_policy"] = {
+            "cpu_millis": 1750,
+            "memory_bytes": 1024 * 1024 * 1024,
+            "architecture": "amd64",
+            "network_policy": "deny",
+            "runtime_interface": "openenv",
+        }
+        project_file.write_text(json.dumps(project_config))
         captured = {"paths": [], "environment_body": None}
 
         existing_listing = {
@@ -1836,7 +1867,7 @@ class TestRootDeployCommand:
         assert project["namespace_id"] == "ns-1"
         assert project["listing_id"] == "lst-new"
         assert project["deployment_id"] == "dep-1"
-        assert captured["environment_body"]["resource_policy"]["runtime_interface"] == "openenv"
+        assert captured["environment_body"]["resource_policy"] == project_config["resource_policy"]
         assert ("POST", "/v1/environment-deployments") in captured["paths"]
         output = capsys.readouterr().out
         assert "Deployed demo-env@1.0.0" in output
