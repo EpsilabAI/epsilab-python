@@ -196,6 +196,11 @@ An RL environment is a containerized task server. At minimum it needs:
 | `tasks.json` | JSON array defining the task set |
 | `.epsilab/project.json` | Local project linkage, populated on first deploy |
 
+Generated projects use `"reward_mode": "continuous"`, which accepts any finite
+reward from 0 through 1, including binary rewards. Set it to `"binary"` when
+every terminal reward is exactly 0 or 1, or `"partial_credit"` when fractional
+rewards represent completed rubric items.
+
 ### Environment protocol
 
 The generated server uses the OpenEnv contract and exposes:

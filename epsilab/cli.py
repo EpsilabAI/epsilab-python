@@ -662,6 +662,13 @@ def _environment_resource_policy(config: dict) -> dict:
     return policy
 
 
+def _environment_reward_mode(config: dict) -> str:
+    reward_mode = config.get("reward_mode", "continuous")
+    if reward_mode not in {"binary", "continuous", "partial_credit"}:
+        raise ValueError("reward_mode must be binary, continuous, or partial_credit")
+    return reward_mode
+
+
 def _docker_build_and_upload(
     client: EpsilabClient, directory: Path, image_tag: str,
     *, build_context: Path | None = None, build_args: dict | None = None,
@@ -1257,6 +1264,7 @@ def _deploy_environment(
     """Build, upload, and register an environment release."""
     listing_id = project["listing_id"]
     resource_policy = _environment_resource_policy(project)
+    reward_mode = _environment_reward_mode(project)
 
     version = args.version or project.get("version") or "1.0.0"
     if is_interactive() and not args.yes and not args.version and not project.get("version"):
@@ -1422,7 +1430,7 @@ def _deploy_environment(
             runtime_digest=digest,
             source_digest=source_digest,
             evidence_schema_digest=source_digest,
-            reward_mode="binary",
+            reward_mode=reward_mode,
             idempotency_key=ver_idem,
         )
     except ApiError as e:
@@ -1638,7 +1646,7 @@ def cmd_env_push(args: argparse.Namespace) -> None:
         ver_runtime_digest = args.verifier_digest or ver_config.get("runtime_digest", "")
         ver_source_digest = ver_config.get("source_digest", "")
         ver_evidence_schema_digest = ver_config.get("evidence_schema_digest", "")
-        ver_reward_mode = ver_config.get("reward_mode", "binary")
+        ver_reward_mode = _environment_reward_mode(ver_config)
 
         ver_idem = _deterministic_idem_key(
             "ver", namespace_id=namespace_id, name=ver_name,
@@ -3045,6 +3053,7 @@ def cmd_env_init(args: argparse.Namespace) -> None:
             "summary": "A deterministic OpenEnv environment.",
             "version": "1.0.0",
             "visibility": "public",
+            "reward_mode": "continuous",
             "resource_policy": dict(_DEFAULT_ENVIRONMENT_RESOURCE_POLICY),
             "namespace_id": "",
             "listing_id": "",

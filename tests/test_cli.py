@@ -23,6 +23,7 @@ from epsilab.cli import (
     _environment_horizon_errors,
     _environment_plugin_slugs,
     _environment_resource_policy,
+    _environment_reward_mode,
     _get_client,
     _interactive_action,
     _normalize_cli_argv,
@@ -1805,6 +1806,17 @@ class TestRunEnvironmentCommand:
 
 
 class TestRootDeployCommand:
+    @pytest.mark.parametrize("reward_mode", ["binary", "continuous", "partial_credit"])
+    def test_environment_reward_mode_accepts_supported_values(self, reward_mode):
+        assert _environment_reward_mode({"reward_mode": reward_mode}) == reward_mode
+
+    def test_environment_reward_mode_defaults_to_continuous(self):
+        assert _environment_reward_mode({}) == "continuous"
+
+    def test_environment_reward_mode_rejects_unknown_values(self):
+        with pytest.raises(ValueError, match="reward_mode"):
+            _environment_reward_mode({"reward_mode": "score"})
+
     def test_platform_horizon_capability_is_enforced_before_build(self, tmp_path):
         directory = tmp_path / "environment"
         directory.mkdir()
@@ -1939,7 +1951,12 @@ class TestRootDeployCommand:
             "runtime_interface": "openenv",
         }
         project_file.write_text(json.dumps(project_config))
-        captured = {"paths": [], "environment_body": None, "listing_body": None}
+        captured = {
+            "paths": [],
+            "environment_body": None,
+            "listing_body": None,
+            "verifier_body": None,
+        }
 
         existing_listing = {
             "listing_id": "lst-existing",
@@ -1986,6 +2003,7 @@ class TestRootDeployCommand:
             if req.method == "POST" and req.url.path == "/v1/task-pack-releases":
                 return _json_response({"release_id": "pack-1"}, status=201)
             if req.method == "POST" and req.url.path == "/v1/verifier-releases":
+                captured["verifier_body"] = json.loads(req.content)
                 return _json_response({"release_id": "ver-1"}, status=201)
             if req.method == "POST" and req.url.path == "/v1/environment-releases":
                 captured["environment_body"] = json.loads(req.content)
@@ -2022,6 +2040,7 @@ class TestRootDeployCommand:
         assert project["deployment_id"] == "dep-1"
         assert project["visibility"] == "unlisted"
         assert captured["listing_body"]["visibility"] == "unlisted"
+        assert captured["verifier_body"]["reward_mode"] == "continuous"
         assert captured["environment_body"]["resource_policy"] == project_config["resource_policy"]
         assert ("POST", "/v1/environment-deployments") in captured["paths"]
         output = capsys.readouterr().out
