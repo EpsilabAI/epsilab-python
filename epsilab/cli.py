@@ -54,6 +54,12 @@ _DEFAULT_ENVIRONMENT_RESOURCE_POLICY = {
 }
 
 
+def _normalize_slug(value: str) -> str:
+    """Return a registry-compatible slug derived from user-facing text."""
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:64].rstrip("-")
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -764,19 +770,19 @@ def _resolve_namespace(client: EpsilabClient, directory: Path, *, auto: bool = F
 
 def _create_namespace(client: EpsilabClient, directory: Path, *, auto: bool = False) -> str:
     """Create a namespace, interactively or from the directory name."""
-    import re
-
     default_slug = ""
     try:
         profile = client.get_creator_profile()
         default_slug = str(profile.get("display_name", ""))
     except EpsilabError:
         _cli_logger.debug("Creator profile unavailable while selecting a namespace", exc_info=True)
-    default_slug = re.sub(r"[^a-z0-9]+", "-", default_slug.lower()).strip("-")
+    default_slug = _normalize_slug(default_slug)
     if len(default_slug) < 3:
-        default_slug = directory.parent.name.lower().replace(" ", "-").replace("_", "-")
+        default_slug = _normalize_slug(directory.parent.name)
     if len(default_slug) < 3:
-        default_slug = directory.name.lower().replace(" ", "-").replace("_", "-")
+        default_slug = _normalize_slug(directory.name)
+    if len(default_slug) < 3:
+        default_slug = "epsilab"
     if auto or not is_interactive():
         slug = default_slug
         display_name = slug.replace("-", " ").title()
@@ -930,8 +936,9 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     existing_listing_id = (project or {}).get("listing_id")
     client = _get_client()
     try:
-        if project:
-            pid = project.get("listing_id") or project.get("tool_id") or "?"
+        project_id = (project or {}).get("listing_id") or (project or {}).get("tool_id")
+        if project and project_id:
+            pid = str(project_id)
             _ok(f"\n  Linked to {project.get('slug', '?')} ({pid[:8]}...)")
         if not project or not project.get("namespace_id"):
             step("Set up project")
@@ -1238,9 +1245,7 @@ def _deploy_tool(
 
 def _detect_plugin_names(directory: Path) -> list[str]:
     """Derive slug-format plugin names from the directory."""
-    import re
-    name = directory.name.lower()
-    name = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
+    name = _normalize_slug(directory.name)
     return [name] if name else ["plugin"]
 
 
@@ -1813,11 +1818,12 @@ def cmd_env_visibility(args: argparse.Namespace) -> None:
         if listing.visibility == args.visibility:
             updated = listing
         else:
-            updated = client.update_listing(
+            client.update_listing(
                 listing.listing_id,
                 expected_revision=listing.revision,
                 visibility=args.visibility,
             )
+            updated = client.get_environment_listing(listing.listing_id)
         if args.json:
             _json_out(updated.to_dict())
         else:
@@ -2994,8 +3000,6 @@ def _default_environment_smoke_action(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def cmd_env_init(args: argparse.Namespace) -> None:
-    import re
-
     slug = args.slug
     target_dir = args.directory
 
@@ -3006,7 +3010,7 @@ def cmd_env_init(args: argparse.Namespace) -> None:
             target_dir = text("Project directory", default=slug)
 
     raw_slug = slug or "my-environment"
-    slug = re.sub(r"[^a-z0-9]+", "-", raw_slug.lower()).strip("-")
+    slug = _normalize_slug(raw_slug)
     if len(slug) < 3 or len(slug) > 64:
         _err("Environment name must produce a 3-64 character slug.")
     target = Path(target_dir or slug)

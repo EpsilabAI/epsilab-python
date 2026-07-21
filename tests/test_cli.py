@@ -26,9 +26,11 @@ from epsilab.cli import (
     _get_client,
     _interactive_action,
     _normalize_cli_argv,
+    _normalize_slug,
     _platform_openenv_max_steps,
     _public_step_info,
     _resolve_listing,
+    _create_namespace,
     _resolve_environment_task,
     _resolve_tool_bindings,
     _load_config,
@@ -100,6 +102,10 @@ class TestParser:
     def test_deploy_accepts_listing_visibility(self):
         args = build_parser().parse_args(["deploy", "--visibility", "unlisted"])
         assert args.visibility == "unlisted"
+
+    def test_generated_slugs_match_registry_contract(self):
+        assert _normalize_slug("Build.Output_2026") == "build-output-2026"
+        assert _normalize_slug("-" + "a" * 80 + "-") == "a" * 64
 
     def test_environment_visibility_command(self):
         args = build_parser().parse_args([
@@ -252,6 +258,27 @@ class TestParser:
         )
         assert args.display_name == "My Name"
         assert args.bio == "hello"
+
+
+class TestNamespaceSetup:
+    def test_auto_namespace_normalizes_parent_directory(self, tmp_path):
+        project = tmp_path / "Build.Output_2026" / "demo-environment"
+        project.mkdir(parents=True)
+        captured = {}
+
+        class Client:
+            def get_creator_profile(self):
+                return {}
+
+            def create_namespace(self, *, slug, display_name):
+                captured.update(slug=slug, display_name=display_name)
+                return {"namespace_id": "ns-1"}
+
+        assert _create_namespace(Client(), project, auto=True) == "ns-1"
+        assert captured == {
+            "slug": "build-output-2026",
+            "display_name": "Build Output 2026",
+        }
 
 
 class TestEnvironmentSmokeAction:
@@ -855,12 +882,20 @@ class TestEnvVisibility:
 
         def handler(req):
             if req.method == "GET" and req.url.path == "/v1/environment-listings/lst-1":
-                return _json_response(listing)
-            if req.method == "PATCH" and req.url.path == "/v1/environment-listings/lst-1":
-                captured["body"] = json.loads(req.content)
                 return _json_response({
                     **listing,
-                    "visibility": captured["body"]["visibility"],
+                    "visibility": captured.get("visibility", listing["visibility"]),
+                    "listing_revision": 4 if "visibility" in captured else 3,
+                })
+            if req.method == "PATCH" and req.url.path == "/v1/environment-listings/lst-1":
+                captured["body"] = json.loads(req.content)
+                captured["visibility"] = captured["body"]["visibility"]
+                return _json_response({
+                    "listing_id": listing["listing_id"],
+                    "namespace_id": listing["namespace_id"],
+                    "slug": listing["slug"],
+                    "title": listing["title"],
+                    "visibility": captured["visibility"],
                     "listing_revision": 4,
                 })
             raise AssertionError(f"unexpected request: {req.method} {req.url.path}")
