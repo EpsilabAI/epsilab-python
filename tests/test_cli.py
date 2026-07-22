@@ -335,6 +335,10 @@ class TestEnvInit:
         assert (target / "requirements.txt").exists()
         assert (target / ".epsilab" / "project.json").exists()
 
+        dockerfile = (target / "Dockerfile").read_text()
+        assert "mv /app/verifier.py /opt/epsilab/verifier.py" in dockerfile
+        assert "ln -s /app /opt/epsilab" not in dockerfile
+
         tasks = json.loads((target / "tasks.json").read_text())
         assert isinstance(tasks, list)
         assert tasks[0]["task_id"] == "test-env-easy-train-001"

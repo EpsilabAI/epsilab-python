@@ -2267,7 +2267,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir --no-deps openenv-core==0.3.0
 COPY . /app/
-RUN mkdir -p /opt && ln -s /app /opt/epsilab
+RUN mkdir -p /opt/epsilab && mv /app/verifier.py /opt/epsilab/verifier.py
 
 USER 65532:65532
 EXPOSE 8000
