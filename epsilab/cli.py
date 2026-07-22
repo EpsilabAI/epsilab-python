@@ -167,6 +167,8 @@ def _friendly_error(exc: Exception) -> str:
                 detail = body["detail"]
                 if isinstance(detail, str):
                     return detail
+                if isinstance(detail, dict) and isinstance(detail.get("message"), str):
+                    return detail["message"]
                 if isinstance(detail, list):
                     return "; ".join(
                         d.get("msg", str(d)) for d in detail if isinstance(d, dict)
@@ -2306,7 +2308,7 @@ class TextAction(Action):
 
 
 class TextObservation(Observation):
-    content: str
+    value: str
     context: dict[str, Any] = Field(default_factory=dict)
     terminated: bool = False
     truncated: bool = False
@@ -2341,7 +2343,7 @@ class ExampleEnvironment(Environment[TextAction, TextObservation, TaskState]):
             task=task,
         )
         return TextObservation(
-            content=task["prompt"],
+            value=task["prompt"],
             context={"task_id": task["task_id"], "difficulty": task["difficulty"]},
         )
 
@@ -2350,7 +2352,7 @@ class ExampleEnvironment(Environment[TextAction, TextObservation, TaskState]):
             self.reset()
         if self._state.submitted:
             return TextObservation(
-                content="Episode already completed.",
+                value="Episode already completed.",
                 done=True,
                 terminated=True,
                 info={"error": "already_completed"},
@@ -2360,7 +2362,7 @@ class ExampleEnvironment(Environment[TextAction, TextObservation, TaskState]):
                 update={"step_count": self._state.step_count + 1}
             )
             return TextObservation(
-                content="Submit your final answer when ready.",
+                value="Submit your final answer when ready.",
                 info={"step": self._state.step_count},
             )
 
@@ -2368,7 +2370,7 @@ class ExampleEnvironment(Environment[TextAction, TextObservation, TaskState]):
         reward = 1.0 if action.content.strip().casefold() == expected else 0.0
         self._state = self._state.model_copy(update={"submitted": True})
         return TextObservation(
-            content="Correct." if reward == 1.0 else "That answer is not correct.",
+            value="Correct." if reward == 1.0 else "That answer is not correct.",
             reward=reward,
             done=True,
             terminated=True,
@@ -2509,8 +2511,8 @@ def _verify_claim(index: int, claimed: dict[str, Any], replayed: Any) -> None:
         raise ValueError(f"truncation diverged at step {index}")
     observation = claimed.get("observation")
     if isinstance(observation, dict):
-        observation = observation.get("content")
-    if isinstance(observation, str) and observation != replayed.content:
+        observation = observation.get("value")
+    if isinstance(observation, str) and observation != replayed.value:
         raise ValueError(f"observation diverged at step {index}")
 
 
@@ -2983,7 +2985,7 @@ def cmd_env_test(args: argparse.Namespace) -> None:
         return
 
     max_steps = args.steps or int(task.get("max_steps", 5))
-    _ok(f"Testing environment: {target.name}")
+    _ok(f"Testing environment: {target.resolve().name}")
     _ok(f"  Task:      {task_id}")
     _ok(f"  Max steps: {max_steps}")
 
@@ -3115,7 +3117,13 @@ def cmd_env_test(args: argparse.Namespace) -> None:
             steps_completed += 1
             step_observation = step_body.get("observation", "")
             observation_payload = step_observation if isinstance(step_observation, dict) else {}
-            normalized_observation = observation_payload.get("content", step_observation)
+            normalized_observation = observation_payload.get("value")
+            if not isinstance(normalized_observation, str):
+                normalized_observation = (
+                    json.dumps(observation_payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
+                    if observation_payload
+                    else step_observation
+                )
             step_obs = str(normalized_observation)[:200]
             reward = step_body.get("reward")
             step_done = step_body.get("done", False)
@@ -3151,7 +3159,13 @@ def cmd_env_test(args: argparse.Namespace) -> None:
                 image=tag,
                 task=task,
                 seed=42,
-                initial_observation=obs.get("content", "") if isinstance(obs, dict) else obs,
+                initial_observation=(
+                    obs.get("value")
+                    if isinstance(obs, dict) and isinstance(obs.get("value"), str)
+                    else json.dumps(obs, allow_nan=False, separators=(",", ":"), sort_keys=True)
+                    if isinstance(obs, dict)
+                    else obs
+                ),
                 steps=trajectory_steps,
             )
             _ok(f"  Session terminated: reward={reward}")

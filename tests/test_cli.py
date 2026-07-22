@@ -25,6 +25,7 @@ from epsilab.cli import (
     _environment_qualification_config,
     _environment_resource_policy,
     _environment_reward_mode,
+    _friendly_error,
     _get_client,
     _interactive_action,
     _normalize_cli_argv,
@@ -44,6 +45,7 @@ from epsilab.cli import (
     cmd_env_verify,
     main,
 )
+from epsilab.exceptions import ApiError
 from epsilab.models import ApplicationTool
 
 
@@ -301,6 +303,23 @@ class TestEnvironmentSmokeAction:
         }
 
 
+class TestFriendlyError:
+    def test_extracts_structured_api_message(self):
+        error = ApiError(
+            422,
+            json.dumps(
+                {
+                    "detail": {
+                        "code": "invalid_hosted_request",
+                        "message": "Hosted compatibility is still running.",
+                    }
+                }
+            ),
+        )
+
+        assert _friendly_error(error) == "Hosted compatibility is still running."
+
+
 class TestConfigFile:
     def test_save_and_load(self, tmp_path):
         config_file = tmp_path / "credentials.json"
@@ -342,6 +361,9 @@ class TestEnvInit:
         verifier = (target / "verifier.py").read_text()
         assert 'trajectory.get("task_snapshot")' in verifier
         assert 'trajectory["task_id"]' not in verifier
+        environment = (target / "environment.py").read_text()
+        assert "class TextObservation(Observation):\n    value: str" in environment
+        assert "replayed.value" in verifier
 
         tasks = json.loads((target / "tasks.json").read_text())
         assert isinstance(tasks, list)
