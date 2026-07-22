@@ -336,6 +336,7 @@ class TestEnvInit:
         assert (target / ".epsilab" / "project.json").exists()
 
         dockerfile = (target / "Dockerfile").read_text()
+        assert "ENV PYTHONPATH=/app" in dockerfile
         assert "mv /app/verifier.py /opt/epsilab/verifier.py" in dockerfile
         assert "ln -s /app /opt/epsilab" not in dockerfile
 
