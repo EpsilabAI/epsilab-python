@@ -19,6 +19,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -2446,12 +2447,18 @@ def _main() -> None:
         steps = trajectory.get("steps")
         if not isinstance(steps, list) or not steps:
             raise ValueError("trajectory has no steps")
+        task_snapshot = trajectory.get("task_snapshot")
+        if not isinstance(task_snapshot, dict):
+            raise ValueError("trajectory has no task snapshot")
+        task_id = task_snapshot.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task snapshot has no task_id")
 
         environment = ExampleEnvironment()
         try:
             environment.reset(
                 seed=trajectory.get("seed") if isinstance(trajectory.get("seed"), int) else None,
-                task_id=str(trajectory["task_id"]),
+                task_id=task_id,
             )
             result = None
             for index, step in enumerate(steps):
@@ -3087,6 +3094,8 @@ def cmd_env_test(args: argparse.Namespace) -> None:
         actions = actions[:max_steps]
         steps_completed = 0
         done = False
+        trajectory_steps: list[dict[str, Any]] = []
+        reward: object = None
 
         for step_idx, action in enumerate(actions):
             method = action.get("method", action.get("action_type", "?"))
@@ -3104,9 +3113,21 @@ def cmd_env_test(args: argparse.Namespace) -> None:
                 break
 
             steps_completed += 1
-            step_obs = str(step_body.get("observation", ""))[:200]
+            step_observation = step_body.get("observation", "")
+            observation_payload = step_observation if isinstance(step_observation, dict) else {}
+            normalized_observation = observation_payload.get("content", step_observation)
+            step_obs = str(normalized_observation)[:200]
             reward = step_body.get("reward")
             step_done = step_body.get("done", False)
+            trajectory_steps.append(
+                {
+                    "action": json.dumps(action, allow_nan=False, separators=(",", ":"), sort_keys=True),
+                    "observation": normalized_observation,
+                    "reward": reward,
+                    "terminated": bool(step_body.get("terminated", observation_payload.get("terminated", False))),
+                    "truncated": bool(step_body.get("truncated", observation_payload.get("truncated", False))),
+                }
+            )
             _ok(f"    reward={reward}  done={step_done}  obs_len={len(str(step_body.get('observation', '')))}")
 
             if "error" in step_obs.lower():
@@ -3126,7 +3147,15 @@ def cmd_env_test(args: argparse.Namespace) -> None:
         print(f"\n{'=' * 60}")
         _ok(f"  Steps completed: {steps_completed}/{len(actions)}")
         if done:
+            _verify_local_trajectory(
+                image=tag,
+                task=task,
+                seed=42,
+                initial_observation=obs.get("content", "") if isinstance(obs, dict) else obs,
+                steps=trajectory_steps,
+            )
             _ok(f"  Session terminated: reward={reward}")
+            _ok("  Verifier accepted the canonical trajectory")
         else:
             _ok(f"  Session did not terminate (ran all {steps_completed} steps)")
         print(f"{'=' * 60}")
@@ -3137,6 +3166,96 @@ def cmd_env_test(args: argparse.Namespace) -> None:
             _ok("\n  Container stopped")
     # Cleanup image
     subprocess.run(["docker", "rmi", tag], capture_output=True, timeout=30)
+
+
+def _verify_local_trajectory(
+    *,
+    image: str,
+    task: dict[str, Any],
+    seed: int,
+    initial_observation: object,
+    steps: list[dict[str, Any]],
+) -> None:
+    """Run the packaged verifier against the hosted trajectory contract."""
+    import subprocess
+
+    terminal = steps[-1]
+    task_json = json.dumps(task, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    task_digest = f"sha256:{hashlib.sha256(task_json.encode('utf-8')).hexdigest()}"
+    placeholder_digest = f"sha256:{'0' * 64}"
+    payload = {
+        "claimed_reward": terminal.get("reward"),
+        "claimed_terminated": terminal.get("terminated"),
+        "claimed_truncated": terminal.get("truncated"),
+        "cpu_millis": 1000,
+        "environment_release_digest": placeholder_digest,
+        "environment_release_id": "00000000-0000-0000-0000-000000000001",
+        "environment_runtime_digest": placeholder_digest,
+        "initial_observation": initial_observation,
+        "kind": "openenv_trajectory",
+        "memory_bytes": 512 * 1024 * 1024,
+        "protocol_version": "0.4.1",
+        "request_id": "00000000-0000-0000-0000-000000000002",
+        "schema_version": 1,
+        "seed": seed,
+        "session_id": "00000000-0000-0000-0000-000000000003",
+        "steps": steps,
+        "task_digest": task_digest,
+        "task_pack_release_digest": placeholder_digest,
+        "task_pack_release_id": "00000000-0000-0000-0000-000000000004",
+        "task_snapshot": task,
+        "terminal_reason": "submitted" if terminal.get("terminated") else "max_steps",
+        "timeout_seconds": 30,
+        "verifier_release_digest": placeholder_digest,
+        "verifier_release_id": "00000000-0000-0000-0000-000000000005",
+        "verifier_runtime_digest": placeholder_digest,
+        "verifier_runtime_ref": f"oci://local/{image}@{placeholder_digest}",
+    }
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--interactive",
+            "--init",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=256",
+            "--tmpfs=/tmp:rw,nosuid,nodev,size=256m",
+            "--log-driver=none",
+            "--entrypoint=python",
+            image,
+            "-B",
+            "/opt/epsilab/verifier.py",
+        ],
+        input=json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip()[-500:] or "the verifier process failed"
+        _err(f"Packaged verifier rejected the local trajectory: {detail}")
+    try:
+        verdict = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        _err("Packaged verifier returned invalid JSON.")
+    if not isinstance(verdict, dict) or verdict.get("status") != "valid":
+        reason = verdict.get("reason", "invalid result") if isinstance(verdict, dict) else "invalid result"
+        _err(f"Packaged verifier rejected the local trajectory: {reason}")
+    verifier_reward = verdict.get("reward")
+    if (
+        isinstance(verifier_reward, bool)
+        or not isinstance(verifier_reward, (int, float))
+        or not 0.0 <= float(verifier_reward) <= 1.0
+    ):
+        _err("Packaged verifier returned an invalid reward.")
+    if verdict.get("terminated") is not bool(terminal.get("terminated")) or verdict.get("truncated") is not bool(
+        terminal.get("truncated")
+    ):
+        _err("Packaged verifier returned different terminal state.")
 
 
 def _default_environment_smoke_action(task: dict[str, Any]) -> dict[str, Any]:

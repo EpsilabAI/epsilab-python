@@ -339,6 +339,9 @@ class TestEnvInit:
         assert "ENV PYTHONPATH=/app" in dockerfile
         assert "mv /app/verifier.py /opt/epsilab/verifier.py" in dockerfile
         assert "ln -s /app /opt/epsilab" not in dockerfile
+        verifier = (target / "verifier.py").read_text()
+        assert 'trajectory.get("task_snapshot")' in verifier
+        assert 'trajectory["task_id"]' not in verifier
 
         tasks = json.loads((target / "tasks.json").read_text())
         assert isinstance(tasks, list)
