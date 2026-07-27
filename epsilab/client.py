@@ -32,6 +32,8 @@ from .models import (
     ArtifactSummary,
     CostEstimate,
     CustomTaskUploadResult,
+    Dataset,
+    DatasetRelease,
     EnvironmentListing,
     EnvironmentRelease,
     EnvironmentSession,
@@ -2536,6 +2538,71 @@ class EpsilabClient:
         )
         return ApplicationToolRelease.from_dict(data)
 
+    def list_datasets(
+        self,
+        *,
+        query: Optional[str] = None,
+        category: Optional[str] = None,
+        domain: Optional[str] = None,
+        purpose: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List["Dataset"]:
+        """Browse reusable dataset inputs available to the current user."""
+        data = self._request(
+            "GET",
+            "/v1/datasets",
+            params={
+                "q": query,
+                "category": category,
+                "domain": domain,
+                "purpose": purpose,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        items = data if isinstance(data, list) else data.get("items", [])
+        return [Dataset.from_dict(item) for item in items]
+
+    def get_dataset(self, dataset_id: str) -> "Dataset":
+        """Get a dataset by ID, including an unlisted dataset reached directly."""
+        data = self._request(
+            "GET",
+            f"/v1/datasets/{self._path_segment(dataset_id)}",
+        )
+        return Dataset.from_dict(data)
+
+    def list_dataset_releases(self, dataset_id: str) -> List["DatasetRelease"]:
+        """List visible immutable releases for one dataset."""
+        data = self._request(
+            "GET",
+            f"/v1/datasets/{self._path_segment(dataset_id)}/releases",
+        )
+        items = data if isinstance(data, list) else data.get("items", [])
+        return [DatasetRelease.from_dict(item) for item in items]
+
+    def get_dataset_release(self, release_id: str) -> "DatasetRelease":
+        """Get one visible immutable dataset release."""
+        data = self._request(
+            "GET",
+            f"/v1/dataset-releases/{self._path_segment(release_id)}",
+        )
+        return DatasetRelease.from_dict(data)
+
+    def star_dataset(self, dataset_id: str) -> None:
+        """Add a dataset to the authenticated user's favorites."""
+        self._request(
+            "PUT",
+            f"/v1/datasets/{self._path_segment(dataset_id)}/star",
+        )
+
+    def unstar_dataset(self, dataset_id: str) -> None:
+        """Remove a dataset from the authenticated user's favorites."""
+        self._request(
+            "DELETE",
+            f"/v1/datasets/{self._path_segment(dataset_id)}/star",
+        )
+
     def list_public_listings(
         self,
         *,
@@ -2661,6 +2728,53 @@ class EpsilabClient:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         _request_logger.debug(
             "POST /v1/environment-images -> %d (%dms)", resp.status_code, elapsed_ms
+        )
+        self._check_response_errors(resp)
+        return resp.json()
+
+    def upload_dataset_artifact(
+        self,
+        bundle_path: str,
+        *,
+        manifest: Dict[str, Any],
+        expanded_size_bytes: int,
+    ) -> Dict[str, Any]:
+        """Validate and upload an immutable dataset bundle.
+
+        The bundle must be a tar archive whose regular files exactly match
+        ``manifest["entries"]``. The platform authenticates the archive and
+        returns the fields needed by :meth:`create_dataset_release`.
+        """
+        path = Path(bundle_path)
+        if not path.is_file():
+            raise ApiError(0, f"Dataset bundle not found: {bundle_path}")
+        if expanded_size_bytes <= 0:
+            raise ValueError("expanded_size_bytes must be positive")
+
+        t0 = time.monotonic()
+        _request_logger.debug(
+            "POST /v1/dataset-artifacts (uploading %s)",
+            path.name,
+        )
+        with path.open("rb") as source:
+            resp = self._client.post(
+                "/v1/dataset-artifacts",
+                files={"bundle": (path.name, source, "application/x-tar")},
+                data={
+                    "manifest_json": json.dumps(
+                        manifest,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    "expanded_size_bytes": str(expanded_size_bytes),
+                },
+                timeout=httpx.Timeout(600.0, connect=30.0),
+            )
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        _request_logger.debug(
+            "POST /v1/dataset-artifacts -> %d (%dms)",
+            resp.status_code,
+            elapsed_ms,
         )
         self._check_response_errors(resp)
         return resp.json()
@@ -4140,6 +4254,122 @@ class EpsilabClient:
         )
         return ApplicationTool.from_dict(data)
 
+    def create_dataset(
+        self,
+        *,
+        namespace_id: str,
+        slug: str,
+        title: str,
+        category: str,
+        summary: str = "",
+        readme: str = "",
+        domain: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        visibility: str = "public",
+        idempotency_key: Optional[str] = None,
+    ) -> "Dataset":
+        """Create a reusable dataset listing."""
+        body: Dict[str, Any] = {
+            "namespace_id": namespace_id,
+            "slug": slug,
+            "title": title,
+            "summary": summary,
+            "readme": readme,
+            "category": category,
+            "tags": tags or [],
+            "visibility": visibility,
+        }
+        if domain is not None:
+            body["domain"] = domain
+        data = self._request(
+            "POST",
+            "/v1/datasets",
+            json_body=body,
+            extra_headers={
+                "Idempotency-Key": idempotency_key or self._auto_idem_key()
+            },
+        )
+        return Dataset.from_dict(data)
+
+    def create_dataset_release(
+        self,
+        *,
+        dataset_id: str,
+        release_version: str,
+        artifact_ref: str,
+        artifact_digest: str,
+        bundle_schema_digest: str,
+        compressed_size_bytes: int,
+        expanded_size_bytes: int,
+        license_id: str,
+        manifest: Dict[str, Any],
+        record_count: Optional[int] = None,
+        usage_policy: Optional[Dict[str, Any]] = None,
+        purpose: str = "environment_seed",
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Publish an immutable, digest-bound dataset release."""
+        body: Dict[str, Any] = {
+            "dataset_id": dataset_id,
+            "release_version": release_version,
+            "artifact_ref": artifact_ref,
+            "artifact_digest": artifact_digest,
+            "bundle_schema_digest": bundle_schema_digest,
+            "compressed_size_bytes": compressed_size_bytes,
+            "expanded_size_bytes": expanded_size_bytes,
+            "purpose": purpose,
+            "license_id": license_id,
+            "usage_policy": usage_policy or {},
+            "manifest": manifest,
+        }
+        if record_count is not None:
+            body["record_count"] = record_count
+        return self._request(
+            "POST",
+            "/v1/dataset-releases",
+            json_body=body,
+            extra_headers={
+                "Idempotency-Key": idempotency_key or self._auto_idem_key()
+            },
+        )
+
+    def update_dataset(
+        self,
+        dataset_id: str,
+        *,
+        expected_revision: int,
+        title: Optional[str] = None,
+        summary: Optional[str] = None,
+        readme: Optional[str] = None,
+        category: Optional[str] = None,
+        domain: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        visibility: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> "Dataset":
+        """Update mutable dataset metadata with optimistic concurrency."""
+        body: Dict[str, Any] = {"expected_revision": expected_revision}
+        for key, value in {
+            "title": title,
+            "summary": summary,
+            "readme": readme,
+            "category": category,
+            "domain": domain,
+            "tags": tags,
+            "visibility": visibility,
+        }.items():
+            if value is not None:
+                body[key] = value
+        data = self._request(
+            "PATCH",
+            f"/v1/datasets/{self._path_segment(dataset_id)}",
+            json_body=body,
+            extra_headers={
+                "Idempotency-Key": idempotency_key or self._auto_idem_key()
+            },
+        )
+        return Dataset.from_dict(data)
+
     def update_listing(
         self,
         listing_id: str,
@@ -4322,6 +4552,7 @@ class EpsilabClient:
         observation_schema_digest: str,
         resource_policy: Optional[Dict[str, Any]] = None,
         application_tools: Optional[List[Dict[str, str]]] = None,
+        dataset_bindings: Optional[List[Dict[str, Any]]] = None,
         idempotency_key: Optional[str] = None,
     ) -> "EnvironmentRelease":
         """Register an environment release (creator operation).
@@ -4343,6 +4574,9 @@ class EpsilabClient:
             application_tools: Tool release bindings, each a dict with
                 ``tool_release_id``, ``alias``, and
                 ``configuration_digest``.
+            dataset_bindings: Dataset release bindings, each a dict with
+                ``dataset_release_id``, ``alias``, ``configuration_digest``,
+                and optional ``target_tool_alias``.
             idempotency_key: Unique key for at-most-once delivery.
 
         Returns:
@@ -4363,6 +4597,8 @@ class EpsilabClient:
             body["resource_policy"] = resource_policy
         if application_tools:
             body["application_tools"] = application_tools
+        if dataset_bindings:
+            body["dataset_bindings"] = dataset_bindings
         data = self._request(
             "POST", "/v1/environment-releases", json_body=body,
             extra_headers={"Idempotency-Key": idempotency_key or self._auto_idem_key()},

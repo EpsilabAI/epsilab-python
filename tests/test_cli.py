@@ -35,6 +35,7 @@ from epsilab.cli import (
     _resolve_listing,
     _create_namespace,
     _resolve_environment_task,
+    _resolve_dataset_bindings,
     _resolve_tool_bindings,
     _load_config,
     _resolve_api_key,
@@ -46,7 +47,7 @@ from epsilab.cli import (
     main,
 )
 from epsilab.exceptions import ApiError
-from epsilab.models import ApplicationTool
+from epsilab.models import ApplicationTool, Dataset
 
 
 def _json_response(body, status=200):
@@ -1692,6 +1693,145 @@ class TestApplicationToolBindings:
 
         with pytest.raises(ValueError, match="configure it as <owner>/<slug>"):
             _resolve_tool_bindings(Client(), ["slack"])
+
+
+class TestDatasetBindings:
+    @staticmethod
+    def _dataset(
+        slug: str,
+        *,
+        namespace: str = "epsilab",
+        release_id: str | None = None,
+    ) -> Dataset:
+        return Dataset(
+            dataset_id=f"dataset-{namespace}-{slug}",
+            namespace_id=f"namespace-{namespace}",
+            namespace=namespace,
+            slug=slug,
+            title=slug.title(),
+            category="seed-data",
+            recommended_release_id=release_id,
+        )
+
+    def test_resolves_exact_release_target_and_configuration(self):
+        queries = []
+
+        class Client:
+            def list_datasets(self, **kwargs):
+                queries.append(kwargs)
+                return [
+                    TestDatasetBindings._dataset(
+                        "crm-history",
+                        namespace="epsilab",
+                        release_id="release-crm",
+                    )
+                ]
+
+        bindings = _resolve_dataset_bindings(
+            Client(),
+            [
+                {
+                    "dataset": "epsilab/crm-history",
+                    "alias": "crm-data",
+                    "target_tool_alias": "hubspot",
+                }
+            ],
+        )
+        assert bindings == [
+            {
+                "dataset_release_id": "release-crm",
+                "alias": "crm-data",
+                "configuration_digest": (
+                    "sha256:44136fa355b3678a1146ad16f7e8649e"
+                    "94fb4fc21fe77e8310c060f61caaff8a"
+                ),
+                "target_tool_alias": "hubspot",
+            }
+        ]
+        assert queries == [{"query": "crm-history", "limit": 100}]
+
+    def test_missing_and_ambiguous_datasets_fail_closed(self):
+        class MissingClient:
+            def list_datasets(self, **_kwargs):
+                return []
+
+        with pytest.raises(ValueError, match="was not found"):
+            _resolve_dataset_bindings(MissingClient(), ["crm-history"])
+
+        class AmbiguousClient:
+            def list_datasets(self, **_kwargs):
+                return [
+                    TestDatasetBindings._dataset("crm-history", namespace="one"),
+                    TestDatasetBindings._dataset("crm-history", namespace="two"),
+                ]
+
+        with pytest.raises(ValueError, match="configure it as <owner>/<slug>"):
+            _resolve_dataset_bindings(AmbiguousClient(), ["crm-history"])
+
+    def test_rejects_duplicate_aliases_and_unknown_fields(self):
+        class Client:
+            def list_datasets(self, **_kwargs):
+                return [
+                    TestDatasetBindings._dataset(
+                        "first",
+                        release_id="release-first",
+                    ),
+                    TestDatasetBindings._dataset(
+                        "second",
+                        release_id="release-second",
+                    ),
+                ]
+
+        with pytest.raises(ValueError, match="duplicated"):
+            _resolve_dataset_bindings(
+                Client(),
+                [
+                    {"dataset": "first", "alias": "data"},
+                    {"dataset": "second", "alias": "data"},
+                ],
+            )
+        with pytest.raises(ValueError, match="unsupported fields"):
+            _resolve_dataset_bindings(
+                Client(),
+                [{"dataset": "first", "magic": True}],
+            )
+
+    @pytest.mark.parametrize(
+        ("release_dataset_id", "qualification_state", "error"),
+        [
+            ("dataset-epsilab-other", "qualified", "does not belong"),
+            ("dataset-epsilab-crm-history", "revoked", "is not qualified"),
+        ],
+    )
+    def test_explicit_release_must_belong_to_qualified_dataset(
+        self,
+        release_dataset_id,
+        qualification_state,
+        error,
+    ):
+        dataset = self._dataset("crm-history", release_id="recommended-release")
+
+        class Client:
+            def list_datasets(self, **_kwargs):
+                return [dataset]
+
+            def get_dataset_release(self, release_id):
+                assert release_id == "pinned-release"
+                return SimpleNamespace(
+                    dataset_id=release_dataset_id,
+                    qualification_state=qualification_state,
+                )
+
+        with pytest.raises(ValueError, match=error):
+            _resolve_dataset_bindings(
+                Client(),
+                [
+                    {
+                        "dataset": "epsilab/crm-history",
+                        "release_id": "pinned-release",
+                    }
+                ],
+            )
 
 
 class TestRunEnvironmentCommand:

@@ -718,6 +718,7 @@ class ApplicationTool:
     creator_display_name: Optional[str] = None
     creator_verification_status: Optional[str] = None
     used_by_environments: List[Dict[str, Any]] = field(default_factory=list)
+    compatible_datasets: List[Dict[str, Any]] = field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -749,6 +750,7 @@ class ApplicationTool:
             creator_display_name=data.get("creator_display_name"),
             creator_verification_status=data.get("creator_verification_status"),
             used_by_environments=list(data.get("used_by_environments") or []),
+            compatible_datasets=list(data.get("compatible_datasets") or []),
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
         )
@@ -791,6 +793,134 @@ class ApplicationToolRelease:
             seed_schema_digest=data.get("seed_schema_digest", ""),
             interface_schema_digest=data.get("interface_schema_digest", ""),
             license_id=data.get("license_id", ""),
+            manifest=dict(data.get("manifest") or {}),
+            created_at=data.get("created_at"),
+            qualified_at=data.get("qualified_at"),
+            revoked_at=data.get("revoked_at"),
+        )
+
+
+@dataclass
+class Dataset:
+    """A reusable, immutable dataset listed on the environment hub."""
+
+    dataset_id: str
+    namespace_id: str
+    slug: str
+    title: str
+    category: str
+    summary: str = ""
+    readme: str = ""
+    domain: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    visibility: str = "public"
+    moderation_state: str = "approved"
+    recommended_release_id: Optional[str] = None
+    revision: int = 1
+    namespace: Optional[str] = None
+    release_version: Optional[str] = None
+    qualification_state: Optional[str] = None
+    purpose: Optional[str] = None
+    compressed_size_bytes: Optional[int] = None
+    expanded_size_bytes: Optional[int] = None
+    record_count: Optional[int] = None
+    license_id: Optional[str] = None
+    manifest: Optional[Dict[str, Any]] = None
+    star_count: int = 0
+    starred_by_me: bool = False
+    creator_display_name: Optional[str] = None
+    creator_verification_status: Optional[str] = None
+    compatible_tools: List[Dict[str, Any]] = field(default_factory=list)
+    used_by_environments: List[Dict[str, Any]] = field(default_factory=list)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Dataset":
+        return cls(
+            dataset_id=str(data["dataset_id"]),
+            namespace_id=str(data.get("namespace_id", "")),
+            namespace=data.get("namespace"),
+            slug=data.get("slug", ""),
+            title=data.get("title", ""),
+            summary=data.get("summary", ""),
+            readme=data.get("readme", ""),
+            category=data.get("category", ""),
+            domain=data.get("domain"),
+            tags=list(data.get("tags") or []),
+            visibility=data.get("visibility", "public"),
+            moderation_state=data.get("moderation_state", "approved"),
+            recommended_release_id=_opt_str(data.get("recommended_release_id")),
+            revision=int(data.get("revision", 1)),
+            release_version=data.get("release_version"),
+            qualification_state=data.get("qualification_state"),
+            purpose=data.get("purpose"),
+            compressed_size_bytes=data.get("compressed_size_bytes"),
+            expanded_size_bytes=data.get("expanded_size_bytes"),
+            record_count=data.get("record_count"),
+            license_id=data.get("license_id"),
+            manifest=dict(data["manifest"]) if isinstance(data.get("manifest"), dict) else None,
+            star_count=int(data.get("star_count", 0)),
+            starred_by_me=bool(data.get("starred_by_me", False)),
+            creator_display_name=data.get("creator_display_name"),
+            creator_verification_status=data.get("creator_verification_status"),
+            compatible_tools=list(data.get("compatible_tools") or []),
+            used_by_environments=list(data.get("used_by_environments") or []),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+        )
+
+
+@dataclass
+class DatasetRelease:
+    """An immutable dataset release and its runtime input contract."""
+
+    release_id: str
+    dataset_id: str
+    release_version: str
+    content_digest: str
+    qualification_state: str
+    artifact_digest: str
+    bundle_schema_digest: str
+    compressed_size_bytes: int
+    expanded_size_bytes: Optional[int]
+    purpose: str
+    license_id: str
+    artifact_ref: Optional[str] = None
+    record_count: Optional[int] = None
+    usage_policy: Dict[str, Any] = field(default_factory=dict)
+    manifest: Dict[str, Any] = field(default_factory=dict)
+    created_at: Optional[str] = None
+    qualified_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DatasetRelease":
+        return cls(
+            release_id=str(data["release_id"]),
+            dataset_id=str(data["dataset_id"]),
+            release_version=data.get("release_version", ""),
+            content_digest=data.get("content_digest", ""),
+            qualification_state=data.get("qualification_state", "qualified"),
+            artifact_ref=data.get("artifact_ref"),
+            artifact_digest=data.get("artifact_digest", ""),
+            bundle_schema_digest=data.get("bundle_schema_digest", ""),
+            compressed_size_bytes=int(data.get("compressed_size_bytes", 0)),
+            expanded_size_bytes=(
+                int(data["expanded_size_bytes"])
+                if data.get("expanded_size_bytes") is not None
+                else None
+            ),
+            record_count=data.get("record_count"),
+            purpose=data.get("purpose", "environment_seed"),
+            license_id=data.get("license_id", ""),
+            usage_policy=dict(data.get("usage_policy") or {}),
             manifest=dict(data.get("manifest") or {}),
             created_at=data.get("created_at"),
             qualified_at=data.get("qualified_at"),
@@ -1013,6 +1143,8 @@ class EnvironmentRelease:
     protocol_version: str
     status: str = "qualified"
     content_digest: Optional[str] = None
+    application_tools: List[Dict[str, Any]] = field(default_factory=list)
+    dataset_bindings: List[Dict[str, Any]] = field(default_factory=list)
     created_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1027,6 +1159,8 @@ class EnvironmentRelease:
             protocol_version=data.get("protocol_version", ""),
             status=data.get("status", data.get("qualification_state", "qualified")),
             content_digest=data.get("content_digest"),
+            application_tools=list(data.get("application_tools") or []),
+            dataset_bindings=list(data.get("dataset_bindings") or []),
             created_at=data.get("created_at"),
         )
 

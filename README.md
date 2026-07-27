@@ -261,6 +261,68 @@ cd my-tool/
 epsilab deploy    # auto-detects tool structure
 ```
 
+## Publishing and Binding Datasets
+
+Datasets are immutable input bundles that an environment release can mount
+read-only. A dataset targeted at an Application Tool must contain exactly one
+JSON seed file compatible with that tool release's seed schema.
+
+```python
+from epsilab import Epsilab
+
+client = Epsilab()
+dataset = client.create_dataset(
+    namespace_id="namespace-id",
+    slug="crm-history",
+    title="CRM History",
+    category="business-applications",
+    domain="business",
+)
+artifact = client.upload_dataset_artifact(
+    "crm-history.tar.gz",
+    manifest={
+        "schema_version": 1,
+        "schema": {"kind": "appsuite_seed", "version": 1},
+        "entries": [{
+            "path": "hubspot/seed.json",
+            "media_type": "application/json",
+            "record_count": 1000,
+            "seed_schema_digest": "sha256:" + "0" * 64,  # replace with the tool release value
+            "tool_namespace": "epsilab",
+            "tool_slug": "hubspot",
+        }],
+    },
+    expanded_size_bytes=123456,
+)
+client.create_dataset_release(
+    dataset_id=dataset.dataset_id,
+    release_version="1.0.0",
+    license_id="CC-BY-4.0",
+    record_count=1000,
+    **artifact,
+)
+```
+
+Bind the recommended immutable release from an environment project's
+`.epsilab/project.json`:
+
+```json
+{
+  "plugins": ["epsilab/hubspot"],
+  "datasets": [{
+    "dataset": "epsilab/crm-history",
+    "alias": "crm-data",
+    "target_tool_alias": "hubspot"
+  }]
+}
+```
+
+`epsilab deploy` resolves both references to exact release IDs. At session
+start the platform verifies the archive digest and declared files, then mounts
+the bundle at `/epsilab/inputs`. AppSuite environments replace the targeted
+tool's initial seed deterministically; untargeted files remain available to
+environment-specific code.
+
 ## CLI Commands
 
 | Command | Description |

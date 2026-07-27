@@ -27,6 +27,8 @@ from epsilab.models import (
     ApplicationTool,
     ApplicationToolRelease,
     CostEstimate,
+    Dataset,
+    DatasetRelease,
     EnvironmentListing,
     EnvironmentRelease,
     EnvironmentSession,
@@ -2194,6 +2196,162 @@ class TestApplicationTools:
         assert updated.visibility == "unlisted"
 
 
+class TestDatasets:
+    def test_upload_dataset_artifact(self, tmp_path):
+        bundle = tmp_path / "dataset.tar"
+        bundle.write_bytes(b"test-bundle")
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            assert req.url.path == "/v1/dataset-artifacts"
+            assert req.headers["content-type"].startswith("multipart/form-data;")
+            assert b'"expanded_size_bytes"\r\n\r\n11' in req.content
+            assert b'"schema_version":1' in req.content
+            return _json_response(
+                {
+                    "artifact_ref": "object://datasets/tenant/artifact.tar",
+                    "artifact_digest": "sha256:" + "a" * 64,
+                    "bundle_schema_digest": "sha256:" + "b" * 64,
+                    "compressed_size_bytes": 11,
+                    "expanded_size_bytes": 11,
+                    "manifest": {
+                        "schema_version": 1,
+                        "schema": {},
+                        "entries": [],
+                    },
+                },
+                status=201,
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        uploaded = client.upload_dataset_artifact(
+            str(bundle),
+            manifest={
+                "schema_version": 1,
+                "schema": {},
+                "entries": [],
+            },
+            expanded_size_bytes=11,
+        )
+        assert uploaded["artifact_ref"].startswith("object://")
+
+    def test_discovery_release_and_favorites(self):
+        requests = []
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            requests.append((req.method, req.url.path))
+            if req.url.path == "/v1/datasets":
+                assert req.url.params["domain"] == "crm"
+                return _json_response(
+                    [
+                        {
+                            "dataset_id": "dataset-1",
+                            "namespace_id": "ns-1",
+                            "slug": "crm-history",
+                            "title": "CRM History",
+                            "category": "business-applications",
+                        }
+                    ]
+                )
+            if req.url.path == "/v1/dataset-releases/release-1":
+                return _json_response(
+                    {
+                        "release_id": "release-1",
+                        "dataset_id": "dataset-1",
+                        "release_version": "1.0.0",
+                        "content_digest": "sha256:content",
+                        "qualification_state": "qualified",
+                        "artifact_ref": "gs://datasets/crm.tar",
+                        "artifact_digest": "sha256:artifact",
+                        "bundle_schema_digest": "sha256:schema",
+                        "compressed_size_bytes": 100,
+                        "expanded_size_bytes": 80,
+                        "purpose": "environment_seed",
+                        "license_id": "cc-by-4.0",
+                        "manifest": {},
+                    }
+                )
+            if req.url.path.endswith("/star"):
+                return httpx.Response(204, request=req)
+            return _json_response({}, status=404)
+
+        client = _make_client(httpx.MockTransport(capture))
+        datasets = client.list_datasets(domain="crm")
+        release = client.get_dataset_release("release-1")
+        client.star_dataset("dataset-1")
+        client.unstar_dataset("dataset-1")
+
+        assert isinstance(datasets[0], Dataset)
+        assert isinstance(release, DatasetRelease)
+        assert requests[-2:] == [
+            ("PUT", "/v1/datasets/dataset-1/star"),
+            ("DELETE", "/v1/datasets/dataset-1/star"),
+        ]
+
+    def test_create_update_and_release_contract(self):
+        requests = []
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            body = json.loads(req.content)
+            requests.append((req.method, req.url.path, body))
+            if req.url.path == "/v1/dataset-releases":
+                return _json_response(
+                    {
+                        "release_id": "release-1",
+                        "release_type": "dataset",
+                        "release_version": "1.0.0",
+                        "content_digest": "sha256:content",
+                        "qualification_state": "qualified",
+                    },
+                    status=201,
+                )
+            return _json_response(
+                {
+                    "dataset_id": "dataset-1",
+                    "namespace_id": "ns-1",
+                    "slug": "crm-history",
+                    "title": body.get("title", "CRM History"),
+                    "category": body.get("category", "business-applications"),
+                    "domain": body.get("domain"),
+                    "visibility": body.get("visibility", "public"),
+                    "revision": 2,
+                },
+                status=201 if req.method == "POST" else 200,
+            )
+
+        client = _make_client(httpx.MockTransport(capture))
+        created = client.create_dataset(
+            namespace_id="ns-1",
+            slug="crm-history",
+            title="CRM History",
+            category="business-applications",
+            domain="crm",
+        )
+        updated = client.update_dataset(
+            "dataset-1",
+            expected_revision=1,
+            visibility="unlisted",
+        )
+        release = client.create_dataset_release(
+            dataset_id="dataset-1",
+            release_version="1.0.0",
+            artifact_ref="gs://datasets/crm.tar",
+            artifact_digest="sha256:" + "a" * 64,
+            bundle_schema_digest="sha256:" + "b" * 64,
+            compressed_size_bytes=100,
+            expanded_size_bytes=80,
+            record_count=10,
+            license_id="cc-by-4.0",
+            usage_policy={"training": True},
+            manifest={"schema_version": 1, "schema": {}, "entries": []},
+        )
+
+        assert created.domain == "crm"
+        assert updated.visibility == "unlisted"
+        assert release["release_type"] == "dataset"
+        assert requests[-1][2]["expanded_size_bytes"] == 80
+        assert requests[-1][2]["record_count"] == 10
+
+
 class TestListPublicListings:
     def test_with_query(self):
         captured = {}
@@ -3245,6 +3403,14 @@ class TestCreateEnvironmentRelease:
                     "configuration_digest": "sha256:" + "d" * 64,
                 }
             ],
+            dataset_bindings=[
+                {
+                    "dataset_release_id": "dataset-release-1",
+                    "alias": "crm-data",
+                    "target_tool_alias": "hubspot",
+                    "configuration_digest": "sha256:" + "e" * 64,
+                }
+            ],
         )
         assert captured["method"] == "POST"
         assert captured["path"] == "/v1/environment-releases"
@@ -3253,6 +3419,14 @@ class TestCreateEnvironmentRelease:
                 "tool_release_id": "tool-release-1",
                 "alias": "github",
                 "configuration_digest": "sha256:" + "d" * 64,
+            }
+        ]
+        assert captured["body"]["dataset_bindings"] == [
+            {
+                "dataset_release_id": "dataset-release-1",
+                "alias": "crm-data",
+                "target_tool_alias": "hubspot",
+                "configuration_digest": "sha256:" + "e" * 64,
             }
         ]
         assert isinstance(result, EnvironmentRelease)

@@ -29,6 +29,8 @@ from .models import (
     AgentUsage,
     ApplicationTool,
     ApplicationToolRelease,
+    Dataset,
+    DatasetRelease,
     EnvironmentListing,
     EnvironmentRelease,
     EnvironmentSession,
@@ -61,6 +63,8 @@ __all__ = [
     "EnvironmentStepResult",
     "ApplicationTool",
     "ApplicationToolRelease",
+    "Dataset",
+    "DatasetRelease",
 ]
 
-__version__ = "0.17.21"
+__version__ = "0.17.22"

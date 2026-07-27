@@ -317,7 +317,7 @@ def cmd_login(args: argparse.Namespace) -> None:
             f"{_DASHBOARD_URL} (Settings > API Keys)"
         )
     except Exception:
-        pass
+        _cli_logger.debug("API key validation was unavailable; saving credentials", exc_info=True)
 
     config = _load_config()
     profiles = config.setdefault("profiles", {})
@@ -805,7 +805,22 @@ def _resolve_namespace(client: EpsilabClient, directory: Path, *, auto: bool = F
             if ns_id and ns_id not in ns_map:
                 ns_map[ns_id] = ns_slug or ns_id[:12]
     except Exception:
-        pass
+        _cli_logger.debug(
+            "Application Tools unavailable while selecting a namespace",
+            exc_info=True,
+        )
+    try:
+        datasets = client.list_datasets(limit=100)
+        for dataset in datasets:
+            ns_id = getattr(dataset, "namespace_id", None)
+            ns_slug = getattr(dataset, "namespace", None)
+            if ns_id and ns_id not in ns_map:
+                ns_map[ns_id] = ns_slug or ns_id[:12]
+    except Exception:
+        _cli_logger.debug(
+            "Datasets unavailable while selecting a namespace",
+            exc_info=True,
+        )
 
     if len(ns_map) == 1:
         ns_id = next(iter(ns_map))
@@ -868,7 +883,22 @@ def _create_namespace(client: EpsilabClient, directory: Path, *, auto: bool = Fa
                         _ok(f"  Using namespace: {slug}")
                         return ns_id
             except Exception:
-                pass
+                _cli_logger.debug(
+                    "Application Tools unavailable while resolving a namespace",
+                    exc_info=True,
+                )
+            try:
+                for dataset in client.list_datasets(limit=100):
+                    ns_slug = getattr(dataset, "namespace", None)
+                    ns_id = getattr(dataset, "namespace_id", None)
+                    if ns_slug == slug and ns_id:
+                        _ok(f"  Using namespace: {slug}")
+                        return ns_id
+            except Exception:
+                _cli_logger.debug(
+                    "Datasets unavailable while resolving a namespace",
+                    exc_info=True,
+                )
             _err(f"Namespace '{slug}' already exists but could not be resolved.\n"
                  "  Pass --namespace-id explicitly.")
         raise
@@ -1236,6 +1266,113 @@ def _resolve_tool_bindings(client: EpsilabClient, plugin_slugs: list[str]) -> li
     return bindings
 
 
+def _resolve_dataset_bindings(
+    client: EpsilabClient,
+    configured: object,
+) -> list[dict[str, Any]]:
+    """Resolve project dataset references to exact immutable releases."""
+    if configured is None or configured == [] or configured == ():
+        return []
+    if not isinstance(configured, list):
+        raise ValueError("project datasets must be a list")
+    import hashlib as _hashlib
+
+    empty_configuration_digest = "sha256:" + _hashlib.sha256(b"{}").hexdigest()
+    bindings: list[dict[str, Any]] = []
+    aliases: set[str] = set()
+    release_ids: set[str] = set()
+    for raw in configured:
+        if isinstance(raw, str):
+            spec: dict[str, Any] = {"dataset": raw}
+        elif isinstance(raw, dict):
+            spec = dict(raw)
+        else:
+            raise ValueError("each project dataset must be a string or object")
+        unknown = set(spec) - {
+            "alias",
+            "configuration_digest",
+            "dataset",
+            "release_id",
+            "target_tool_alias",
+        }
+        if unknown:
+            raise ValueError(
+                f"project dataset contains unsupported fields: {', '.join(sorted(unknown))}"
+            )
+        reference = spec.get("dataset")
+        if not isinstance(reference, str) or not reference:
+            raise ValueError("project dataset objects require a dataset reference")
+        namespace, separator, slug = reference.partition("/")
+        if not separator:
+            slug = namespace
+            namespace = ""
+        available = client.list_datasets(query=slug, limit=100)
+        matches = [
+            dataset
+            for dataset in available
+            if dataset.slug == slug and (not namespace or dataset.namespace == namespace)
+        ]
+        if not matches:
+            raise ValueError(f"Published dataset '{reference}' was not found")
+        if len(matches) > 1:
+            owners = ", ".join(
+                sorted(f"{dataset.namespace or '?'}/{dataset.slug}" for dataset in matches)
+            )
+            raise ValueError(
+                f"Dataset '{reference}' is ambiguous ({owners}); configure it as <owner>/<slug>."
+            )
+        dataset = matches[0]
+        configured_release_id = spec.get("release_id")
+        if configured_release_id is not None and (
+            not isinstance(configured_release_id, str) or not configured_release_id
+        ):
+            raise ValueError("project dataset release_id must be a non-empty string")
+        release_id = configured_release_id or dataset.recommended_release_id
+        if not isinstance(release_id, str) or not release_id:
+            refreshed = client.get_dataset(dataset.dataset_id)
+            release_id = refreshed.recommended_release_id
+        if not isinstance(release_id, str) or not release_id:
+            raise ValueError(f"Published dataset '{reference}' has no active release")
+        if configured_release_id is not None:
+            release = client.get_dataset_release(release_id)
+            if release.dataset_id != dataset.dataset_id:
+                raise ValueError(
+                    f"Dataset release '{release_id}' does not belong to '{reference}'"
+                )
+            if release.qualification_state != "qualified":
+                raise ValueError(f"Dataset release '{release_id}' is not qualified")
+        alias = spec.get("alias", slug)
+        if not isinstance(alias, str) or not alias:
+            raise ValueError("project dataset alias must be a non-empty string")
+        if alias in aliases:
+            raise ValueError(f"project dataset alias '{alias}' is duplicated")
+        if release_id in release_ids:
+            raise ValueError("a dataset release may only be bound once")
+        configuration_digest = spec.get(
+            "configuration_digest",
+            empty_configuration_digest,
+        )
+        if (
+            not isinstance(configuration_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", configuration_digest) is None
+        ):
+            raise ValueError("project dataset configuration_digest is invalid")
+        binding: dict[str, Any] = {
+            "dataset_release_id": release_id,
+            "alias": alias,
+            "configuration_digest": configuration_digest,
+        }
+        target_tool_alias = spec.get("target_tool_alias")
+        if target_tool_alias is not None:
+            if not isinstance(target_tool_alias, str) or not target_tool_alias:
+                raise ValueError("project dataset target_tool_alias is invalid")
+            binding["target_tool_alias"] = target_tool_alias
+        aliases.add(alias)
+        release_ids.add(release_id)
+        bindings.append(binding)
+    return sorted(bindings, key=lambda item: str(item["alias"]))
+
+
 def _deploy_tool(
     args: argparse.Namespace, client: EpsilabClient,
     directory: Path, detected: dict, project: dict, namespace_id: str,
@@ -1511,6 +1648,9 @@ def _deploy_environment(
     tool_bindings = _resolve_tool_bindings(client, plugin_slugs) if plugin_slugs else []
     if tool_bindings:
         status(f"Resolved {len(tool_bindings)} tool binding(s)", ok=True)
+    dataset_bindings = _resolve_dataset_bindings(client, project.get("datasets"))
+    if dataset_bindings:
+        status(f"Resolved {len(dataset_bindings)} dataset binding(s)", ok=True)
 
     env_idem = _deterministic_idem_key("env", listing_id=listing_id, version=version, digest=digest)
     try:
@@ -1526,6 +1666,7 @@ def _deploy_environment(
             observation_schema_digest=source_digest,
             resource_policy=resource_policy,
             application_tools=tool_bindings or None,
+            dataset_bindings=dataset_bindings or None,
             idempotency_key=env_idem,
         )
     except ApiError as e:
@@ -1764,6 +1905,12 @@ def cmd_env_push(args: argparse.Namespace) -> None:
         push_tool_bindings = _resolve_tool_bindings(client, push_plugin_slugs) if push_plugin_slugs else []
         if push_tool_bindings:
             _ok(f"  Resolved {len(push_tool_bindings)} tool binding(s)")
+        push_dataset_bindings = _resolve_dataset_bindings(
+            client,
+            manifest.get("datasets", env_config.get("datasets")),
+        )
+        if push_dataset_bindings:
+            _ok(f"  Resolved {len(push_dataset_bindings)} dataset binding(s)")
 
         env_idem = _deterministic_idem_key(
             "env", listing_id=listing_id, version=version,
@@ -1782,6 +1929,7 @@ def cmd_env_push(args: argparse.Namespace) -> None:
             observation_schema_digest=env_obs_schema,
             resource_policy=env_resource_policy,
             application_tools=push_tool_bindings or None,
+            dataset_bindings=push_dataset_bindings or None,
             idempotency_key=env_idem,
         )
         _ok(f"  Environment release registered: {release.release_id}")

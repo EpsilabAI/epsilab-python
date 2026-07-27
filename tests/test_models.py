@@ -13,6 +13,8 @@ from epsilab.models import (
     ArtifactSummary,
     CostEstimate,
     CustomTaskUploadResult,
+    Dataset,
+    DatasetRelease,
     EnvironmentListing,
     EnvironmentRelease,
     EnvironmentSession,
@@ -644,10 +646,19 @@ class TestApplicationTools:
                 "title": "Engineering Workspace",
                 "category": "engineering",
                 "plugin_names": ["github", "slack"],
+                "compatible_datasets": [
+                    {
+                        "dataset_id": "dataset-1",
+                        "namespace": "community",
+                        "slug": "engineering-seed",
+                        "title": "Engineering Seed",
+                    }
+                ],
             }
         )
         assert tool.visibility == "public"
         assert tool.plugin_names == ["github", "slack"]
+        assert tool.compatible_datasets[0]["dataset_id"] == "dataset-1"
 
         release = ApplicationToolRelease.from_dict(
             {
@@ -667,6 +678,49 @@ class TestApplicationTools:
         )
         assert release.tool_id == "tool-1"
         assert release.manifest["schema_version"] == 1
+
+
+class TestDatasets:
+    def test_dataset_and_release_from_dict(self):
+        dataset = Dataset.from_dict(
+            {
+                "dataset_id": "dataset-1",
+                "namespace_id": "ns-1",
+                "namespace": "community",
+                "slug": "crm-history",
+                "title": "CRM History",
+                "category": "business-applications",
+                "domain": "crm",
+                "record_count": 100,
+                "compatible_tools": [{"slug": "hubspot"}],
+            }
+        )
+        assert dataset.visibility == "public"
+        assert dataset.domain == "crm"
+        assert dataset.compatible_tools[0]["slug"] == "hubspot"
+
+        release = DatasetRelease.from_dict(
+            {
+                "release_id": "release-1",
+                "dataset_id": "dataset-1",
+                "release_version": "1.0.0",
+                "content_digest": "sha256:content",
+                "qualification_state": "qualified",
+                "artifact_ref": "gs://datasets/crm.tar",
+                "artifact_digest": "sha256:artifact",
+                "bundle_schema_digest": "sha256:schema",
+                "compressed_size_bytes": 1000,
+                "expanded_size_bytes": 750,
+                "record_count": 100,
+                "purpose": "environment_seed",
+                "license_id": "cc-by-4.0",
+                "usage_policy": {"training": True},
+                "manifest": {"schema_version": 1},
+            }
+        )
+        assert release.dataset_id == "dataset-1"
+        assert release.expanded_size_bytes == 750
+        assert release.usage_policy["training"] is True
 
 
 class TestEnvironmentSession:
