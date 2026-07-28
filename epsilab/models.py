@@ -10,6 +10,7 @@ helpers for JSON round-tripping. Import them directly or via
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -540,6 +541,58 @@ class AgentTraceEvent:
 
 
 @dataclass
+class RLTrajectoryStep(Mapping[str, Any]):
+    """One persisted environment step.
+
+    Attribute access is preferred. Mapping access remains supported for
+    compatibility with SDK versions that returned raw dictionaries.
+    """
+
+    step_idx: int
+    action_hash: Optional[str] = None
+    action: Optional[str] = None
+    observation: Optional[str] = None
+    reward: Optional[float] = None
+    terminated: bool = False
+    truncated: bool = False
+    latency_ms: Optional[int] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    model: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return self.to_dict()[key]
+        except KeyError:
+            raise KeyError(key) from None
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.to_dict())
+
+    def __len__(self) -> int:
+        return len(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RLTrajectoryStep":
+        return cls(
+            step_idx=int(data["step_idx"]),
+            action_hash=data.get("action_hash"),
+            action=data.get("action"),
+            observation=data.get("observation"),
+            reward=data.get("reward"),
+            terminated=bool(data.get("terminated", False)),
+            truncated=bool(data.get("truncated", False)),
+            latency_ms=data.get("latency_ms"),
+            input_tokens=data.get("input_tokens"),
+            output_tokens=data.get("output_tokens"),
+            model=data.get("model"),
+        )
+
+
+@dataclass
 class RLTrajectory:
     """Full trajectory for a completed RL session.
 
@@ -550,7 +603,7 @@ class RLTrajectory:
         status: Final session status.
         total_reward: Cumulative reward.
         steps_taken: Total steps.
-        steps: List of step records (action_hash, observation, reward, terminated, truncated).
+        steps: Typed step records. Dictionary-style access remains supported.
         trace_events: Ordered model/reasoning/tool events, including events
             recorded before the first environment step.
     """
@@ -561,7 +614,7 @@ class RLTrajectory:
     status: str
     total_reward: Optional[float] = None
     steps_taken: int = 0
-    steps: List[Dict[str, Any]] = field(default_factory=list)
+    steps: List[RLTrajectoryStep] = field(default_factory=list)
     trace_events: List[AgentTraceEvent] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -579,7 +632,12 @@ class RLTrajectory:
             status=data["status"],
             total_reward=data.get("total_reward"),
             steps_taken=data.get("steps_taken", 0),
-            steps=data.get("steps", []),
+            steps=[
+                step
+                if isinstance(step, RLTrajectoryStep)
+                else RLTrajectoryStep.from_dict(step)
+                for step in data.get("steps", [])
+            ],
             trace_events=[AgentTraceEvent.from_dict(event) for event in data.get("trace_events", [])],
         )
 

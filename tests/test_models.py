@@ -26,6 +26,7 @@ from epsilab.models import (
     RLSession,
     RLStepResult,
     RLTrajectory,
+    RLTrajectoryStep,
     RunSummary,
     UsageRecord,
 )
@@ -504,6 +505,7 @@ class TestRLTrajectory:
         assert t.total_reward == 3.14
         assert t.steps_taken == 5
         assert len(t.steps) == 2
+        assert t.steps[0].action_hash == "a1"
         assert t.steps[0]["action_hash"] == "a1"
         assert t.trace_events == [
             AgentTraceEvent(
@@ -534,7 +536,7 @@ class TestRLTrajectory:
             task_id="t1",
             env_type="single_turn",
             status="completed",
-            steps=[{"step_idx": 0, "reward": 1.0}],
+            steps=[RLTrajectoryStep(step_idx=0, reward=1.0)],
         )
         assert RLTrajectory.from_dict(trajectory.to_dict()) == trajectory
         assert json.loads(trajectory.to_json())["steps"][0]["reward"] == 1.0

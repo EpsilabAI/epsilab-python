@@ -38,6 +38,7 @@ from .models import (
     RLSession,
     RLStepResult,
     RLTrajectory,
+    RLTrajectoryStep,
 )
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "RLSession",
     "RLStepResult",
     "RLTrajectory",
+    "RLTrajectoryStep",
     "AgentToolCall",
     "AgentUsage",
     "AgentTurn",

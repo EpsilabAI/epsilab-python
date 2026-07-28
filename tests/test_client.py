@@ -1671,6 +1671,7 @@ class TestGetRLTrajectory:
         assert traj.session_id == "sess-001"
         assert traj.total_reward == 1.0
         assert len(traj.steps) == 2
+        assert traj.steps[1].reward == 1.0
         assert traj.steps[1]["reward"] == 1.0
         assert traj.trace_events[0].event_type == "reasoning"
 
