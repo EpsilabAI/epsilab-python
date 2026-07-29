@@ -56,7 +56,7 @@ epsilab = "epsilab.cli:main"
 
 [project.urls]
 Homepage = "https://www.epsilab.com"
-Documentation = "https://docs.epsilab.com"
+Documentation = "https://github.com/EpsilabAI/epsilab-python#readme"
 Source = "https://github.com/EpsilabAI/epsilab-python"
 Issues = "https://github.com/EpsilabAI/epsilab-python/issues"
 

@@ -290,7 +290,7 @@ class EpsilabClient:
         warnings.warn(
             f"Epsilab API endpoint '{key}' is deprecated and will be "
             f"removed after {sunset}. Migrate to the RL Environment Hub. "
-            f"See https://docs.epsilab.com/migration/environments",
+            f"See https://github.com/EpsilabAI/epsilab-python#readme",
             DeprecationWarning,
             stacklevel=4,
         )
