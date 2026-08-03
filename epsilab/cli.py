@@ -672,6 +672,41 @@ def _environment_reward_mode(config: dict) -> str:
     return reward_mode
 
 
+def _task_registration_payload(task: dict[str, Any], project: dict[str, Any]) -> dict[str, Any]:
+    """Preserve the complete supported task contract during one-command deploy."""
+    payload: dict[str, Any] = {
+        "task_id": task["task_id"],
+        "domain": task.get("domain", project.get("domain", project["slug"])),
+        "capability": task.get("capability", project["slug"]),
+        "prompt": task.get("prompt", task.get("title", task["task_id"])),
+        "verification": task.get("verification", "judge"),
+        "difficulty": task.get("difficulty", "medium"),
+        "max_steps": task.get("max_steps", 50),
+    }
+    ground_truth = (
+        task.get("ground_truth")
+        or task.get("expected_fix")
+        or task.get("expected_answer")
+    )
+    if ground_truth:
+        payload["ground_truth"] = ground_truth
+    for field in (
+        "hidden_tests",
+        "rubric",
+        "setup_commands",
+        "success_criteria",
+        "tools",
+        "metadata",
+    ):
+        value = task.get(field)
+        if value is not None:
+            payload[field] = value
+    workspace = task.get("workspace")
+    if isinstance(workspace, str):
+        payload["workspace"] = workspace
+    return payload
+
+
 def _environment_qualification_config(config: dict) -> dict[str, Any] | None:
     """Validate the optional hosted qualification profile in project.json."""
     raw = config.get("qualification")
@@ -1560,21 +1595,7 @@ def _deploy_environment(
     if tasks:
         _ok(f"  Creating {len(tasks)} tasks ...")
         for t in tasks:
-            task_body = {
-                "task_id": t["task_id"],
-                "domain": t.get("domain", project.get("domain", project["slug"])),
-                "capability": t.get("capability", project["slug"]),
-                "prompt": t.get("prompt", t.get("title", t["task_id"])),
-                "verification": t.get("verification", "judge"),
-                "difficulty": t.get("difficulty", "medium"),
-                "max_steps": t.get("max_steps", 50),
-            }
-            if t.get("ground_truth") or t.get("expected_fix") or t.get("expected_answer"):
-                task_body["ground_truth"] = (
-                    t.get("ground_truth")
-                    or t.get("expected_fix")
-                    or t.get("expected_answer", "")
-                )
+            task_body = _task_registration_payload(t, project)
             try:
                 client.create_task(task_body)
             except ApiError as e:

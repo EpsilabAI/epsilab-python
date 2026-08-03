@@ -41,6 +41,7 @@ from epsilab.cli import (
     _resolve_api_key,
     _save_config,
     _table,
+    _task_registration_payload,
     build_parser,
     cmd_env_init,
     cmd_env_verify,
@@ -2102,6 +2103,26 @@ class TestRunEnvironmentCommand:
 
 
 class TestRootDeployCommand:
+    def test_task_registration_preserves_native_verifier_contract(self):
+        payload = _task_registration_payload(
+            {
+                "task_id": "strategy-task",
+                "prompt": "Implement strategy(observation)",
+                "verification": "hidden_tests",
+                "hidden_tests": "def check(strategy): assert strategy({}) == 'WAIT'",
+                "metadata": {"entry_point": "strategy"},
+                "setup_commands": ["python -V"],
+                "tools": ["python"],
+                "max_steps": 3,
+            },
+            {"slug": "market-maker-strategy", "domain": "economics"},
+        )
+
+        assert payload["hidden_tests"].startswith("def check")
+        assert payload["metadata"] == {"entry_point": "strategy"}
+        assert payload["setup_commands"] == ["python -V"]
+        assert payload["tools"] == ["python"]
+
     @pytest.mark.parametrize("reward_mode", ["binary", "continuous", "partial_credit"])
     def test_environment_reward_mode_accepts_supported_values(self, reward_mode):
         assert _environment_reward_mode({"reward_mode": reward_mode}) == reward_mode
