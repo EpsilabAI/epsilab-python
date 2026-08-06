@@ -1347,6 +1347,16 @@ def _resolve_dataset_bindings(
             for dataset in available
             if dataset.slug == slug and (not namespace or dataset.namespace == namespace)
         ]
+        # Hyphenated slugs can miss the server-side text query; fall back to
+        # an unfiltered browse page and match exactly client-side.
+        if not matches:
+            available = client.list_datasets(limit=100)
+            matches = [
+                dataset
+                for dataset in available
+                if dataset.slug == slug
+                and (not namespace or dataset.namespace == namespace)
+            ]
         if not matches:
             raise ValueError(f"Published dataset '{reference}' was not found")
         if len(matches) > 1:
