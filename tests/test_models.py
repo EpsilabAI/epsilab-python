@@ -646,6 +646,7 @@ class TestApplicationTools:
                 "namespace": "community",
                 "slug": "eng-workspace",
                 "title": "Engineering Workspace",
+                "demo_url": "https://tools.example.test/engineering-workspace",
                 "category": "engineering",
                 "plugin_names": ["github", "slack"],
                 "compatible_datasets": [
@@ -660,6 +661,7 @@ class TestApplicationTools:
         )
         assert tool.visibility == "public"
         assert tool.plugin_names == ["github", "slack"]
+        assert tool.demo_url == "https://tools.example.test/engineering-workspace"
         assert tool.compatible_datasets[0]["dataset_id"] == "dataset-1"
 
         release = ApplicationToolRelease.from_dict(

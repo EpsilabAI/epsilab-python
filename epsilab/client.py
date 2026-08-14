@@ -4163,6 +4163,7 @@ class EpsilabClient:
         category: str,
         summary: str = "",
         readme: str = "",
+        demo_url: str = "",
         tags: Optional[List[str]] = None,
         visibility: str = "public",
         idempotency_key: Optional[str] = None,
@@ -4179,6 +4180,8 @@ class EpsilabClient:
         }
         if readme:
             body["readme"] = readme
+        if demo_url:
+            body["demo_url"] = demo_url
         data = self._request(
             "POST",
             "/v1/application-tools",
@@ -4229,6 +4232,7 @@ class EpsilabClient:
         title: Optional[str] = None,
         summary: Optional[str] = None,
         readme: Optional[str] = None,
+        demo_url: Optional[str] = None,
         category: Optional[str] = None,
         tags: Optional[List[str]] = None,
         visibility: Optional[str] = None,
@@ -4240,6 +4244,7 @@ class EpsilabClient:
             "title": title,
             "summary": summary,
             "readme": readme,
+            "demo_url": demo_url,
             "category": category,
             "tags": tags,
             "visibility": visibility,

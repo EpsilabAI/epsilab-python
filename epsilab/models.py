@@ -761,6 +761,7 @@ class ApplicationTool:
     category: str
     summary: str = ""
     readme: str = ""
+    demo_url: str = ""
     tags: List[str] = field(default_factory=list)
     visibility: str = "public"
     moderation_state: str = "approved"
@@ -793,6 +794,7 @@ class ApplicationTool:
             title=data.get("title", ""),
             summary=data.get("summary", ""),
             readme=data.get("readme", ""),
+            demo_url=data.get("demo_url", ""),
             category=data.get("category", ""),
             tags=list(data.get("tags") or []),
             visibility=data.get("visibility", "public"),

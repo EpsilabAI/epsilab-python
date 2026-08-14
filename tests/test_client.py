@@ -2172,6 +2172,7 @@ class TestApplicationTools:
                     "slug": "workspace",
                     "title": body.get("title", "Workspace"),
                     "summary": body.get("summary", ""),
+                    "demo_url": body.get("demo_url", ""),
                     "category": body.get("category", "engineering"),
                     "tags": body.get("tags", []),
                     "visibility": body.get("visibility", "public"),
@@ -2186,15 +2187,21 @@ class TestApplicationTools:
             slug="workspace",
             title="Workspace",
             category="engineering",
+            demo_url="https://tools.example.test/workspace",
         )
         updated = client.update_application_tool(
             "tool-1",
             expected_revision=1,
             visibility="unlisted",
+            demo_url="https://tools.example.test/workspace/demo",
         )
         assert requests[0][2]["visibility"] == "public"
+        assert requests[0][2]["demo_url"] == "https://tools.example.test/workspace"
+        assert requests[1][2]["demo_url"] == "https://tools.example.test/workspace/demo"
         assert created.visibility == "public"
+        assert created.demo_url == "https://tools.example.test/workspace"
         assert updated.visibility == "unlisted"
+        assert updated.demo_url == "https://tools.example.test/workspace/demo"
 
 
 class TestDatasets:
